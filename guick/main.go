@@ -36,21 +36,25 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// if we are here, it means we got a request to connect to our websocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade:", err)
+		log.Println("[serve] upgrade:", err)
 	}
 
 	// we receive their peer id
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("read peer id err:", err)
+		log.Println("[serve] read peer id err:", err)
 		return
 	}
-	log.Println("read peer id:", string(msg))
+	log.Println("[serve] incoming connection from peer:", string(msg))
 	// we send our peer id
 	conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
 
 	// might panic here, need validation that msg is uuid
-	peerId := uuid.UUID(msg)
+	peerId, err := uuid.ParseBytes(msg)
+	if err != nil {
+		log.Println("[serve] error parsing UUID", err)
+		return
+	}
 	wsh.hub.register <- &ReqClient{peerId: peerId, conn: conn}
 }
 
@@ -58,24 +62,28 @@ func connect(addr string, ourPeerId uuid.UUID) (*ReqClient, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
-		log.Println("peer connect err:", err)
+		log.Println("[connect] peer connect err:", err)
 		return nil, err
 	}
 
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
-		log.Println("peer id write err:", err)
+		log.Println("[connect] peer id write err:", err)
 		return nil, err
 	}
 
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("read peer id err:", err)
+		log.Println("[connect] read peer id err:", err)
 		return nil, err
 	}
 
 	// might panic here, need validation that msg is uuid
-	peerId := uuid.UUID(msg)
+	peerId, err := uuid.ParseBytes(msg)
+	if err != nil {
+		log.Printf("[connect] error parsing UUID: %v (%b)", err, msg)
+		return nil, err
+	}
 	return &ReqClient{peerId: peerId, conn: conn}, nil
 }
 
@@ -83,7 +91,7 @@ func main() {
 	flag.Parse()
 
 	ourPeerId := uuid.New()
-	log.Println("client id:", ourPeerId)
+	log.Println("our peer id:", ourPeerId)
 	hub := newHub()
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
