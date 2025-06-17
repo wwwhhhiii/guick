@@ -21,15 +21,11 @@ import (
 
 var addr = flag.String("addr", "localhost:8080", "http server address")
 var upgrader = websocket.Upgrader{}
+var curPeerId = uuid.Nil
 
 type wsServeHandler struct {
 	hub    *Hub
 	peerId uuid.UUID
-}
-
-type ReqClient struct {
-	peerId uuid.UUID
-	conn   *websocket.Conn
 }
 
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
@@ -47,18 +43,25 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("[serve] incoming connection from peer:", string(msg))
 	// we send our peer id
-	conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
+	err = conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
+	if err != nil {
+		log.Println("[serve] error sending peer id:", err)
+		return
+	}
 
-	// might panic here, need validation that msg is uuid
 	peerId, err := uuid.ParseBytes(msg)
 	if err != nil {
 		log.Println("[serve] error parsing UUID", err)
 		return
 	}
-	wsh.hub.register <- &ReqClient{peerId: peerId, conn: conn}
+
+	// TODO remove
+	curPeerId = peerId
+
+	wsh.hub.register <- &Client{PeerId: peerId, conn: conn, connT: TypeServer}
 }
 
-func connect(addr string, ourPeerId uuid.UUID) (*ReqClient, error) {
+func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
@@ -78,20 +81,28 @@ func connect(addr string, ourPeerId uuid.UUID) (*ReqClient, error) {
 		return nil, err
 	}
 
-	// might panic here, need validation that msg is uuid
 	peerId, err := uuid.ParseBytes(msg)
 	if err != nil {
 		log.Printf("[connect] error parsing UUID: %v (%b)", err, msg)
 		return nil, err
 	}
-	return &ReqClient{peerId: peerId, conn: conn}, nil
+
+	// TODO remove
+	curPeerId = peerId
+
+	return &Client{PeerId: peerId, conn: conn, connT: TypeClient}, nil
+}
+
+func reconnect(oldConn *websocket.Conn) (*websocket.Conn, error) {
+
+	return nil, nil
 }
 
 func main() {
 	flag.Parse()
 
 	ourPeerId := uuid.New()
-	log.Println("our peer id:", ourPeerId)
+	log.Println("[main] our peer id:", ourPeerId)
 	hub := newHub()
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
@@ -101,7 +112,7 @@ func main() {
 
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	log.Println("running server on", *addr)
+	log.Println("[main] running server on", *addr)
 	go http.ListenAndServe(*addr, nil)
 
 	app := app.New()
@@ -109,14 +120,15 @@ func main() {
 	window.Resize(fyne.NewSize(500, 500))
 
 	clientEntry := widget.NewEntry()
-	clientEntry.SetPlaceHolder("Your message")
+	clientEntry.SetPlaceHolder("Peer IP")
 
-	comWindow := container.New(
+	connContainer := container.New(
 		layout.NewVBoxLayout(),
 		clientEntry,
 		widget.NewButton("Connect", func() {
-			log.Print(clientEntry.Text)
-			// TODO validate address
+			if clientEntry.Text == "" {
+				return
+			}
 			host, _, err := net.SplitHostPort(clientEntry.Text)
 			if err != nil {
 				log.Println("invalid peer address:", clientEntry.Text)
@@ -136,15 +148,23 @@ func main() {
 			clientEntry.SetText("")
 		}),
 	)
-	content := container.NewBorder(
-		nil, nil, nil, nil, comWindow,
-	)
 
-	// go func() {
-	// 	for msg := range hub.recvMessage {
-	// 		fyne.DoAndWait(func() { clientEntry.SetText(msg.txt) })
-	// 	}
-	// }()
+	textEntry := widget.NewEntry()
+	textEntry.SetPlaceHolder("Enter a message")
+	comContainer := container.New(
+		layout.NewVBoxLayout(),
+		textEntry,
+		widget.NewButton("Send", func() {
+			if textEntry.Text == "" {
+				return
+			}
+			hub.sendMessage <- &Msg{fromPeerId: ourPeerId, txt: textEntry.Text, toPeerId: curPeerId}
+			textEntry.SetText("")
+		}),
+	)
+	content := container.NewBorder(
+		nil, nil, connContainer, nil, comContainer,
+	)
 
 	window.SetContent(content)
 	window.Show()

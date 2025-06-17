@@ -5,9 +5,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type ConnType int
+
+const (
+	TypeServer ConnType = iota
+	TypeClient
+)
+
 type Client struct {
 	PeerId uuid.UUID
 	conn   *websocket.Conn
+	connT  ConnType
 }
 
 func NewClient(peerId uuid.UUID, conn *websocket.Conn) *Client {
