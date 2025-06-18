@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"os"
 
@@ -22,7 +23,7 @@ type Hub struct {
 	register chan *Client
 
 	// peer id to unregister and close connection to it
-	unregister chan uuid.UUID
+	unregister chan *Client
 
 	// cominf from client
 	sendMessage chan *Msg
@@ -35,7 +36,7 @@ func newHub() *Hub {
 	return &Hub{
 		clients:     make(map[uuid.UUID]*Client, 100),
 		register:    make(chan *Client),
-		unregister:  make(chan uuid.UUID),
+		unregister:  make(chan *Client),
 		sendMessage: make(chan *Msg),
 		recvMessage: make(chan *Msg),
 	}
@@ -53,9 +54,7 @@ func readPeerMessages(
 	peer *Client,
 ) {
 	for {
-		log.Println("reading...")
 		_, txt, err := peer.conn.ReadMessage()
-		log.Println("red", txt)
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				log.Println("[read] connection closed:", err)
@@ -68,6 +67,39 @@ func readPeerMessages(
 		}
 		hubRecv <- &Msg{fromPeerId: peer.PeerId, txt: string(txt)}
 	}
+}
+
+func (hub *Hub) registerClient(c *Client) error {
+	if _, exist := hub.clients[c.PeerId]; exist {
+		return errors.New("peer already registered")
+	}
+	hub.clients[c.PeerId] = c
+
+	return nil
+}
+
+func (hub *Hub) RegisterClient(client *Client) {
+	hub.register <- client
+}
+
+func (hub *Hub) unregisterClient(c *Client) error {
+	client, exist := hub.clients[c.PeerId]
+	if !exist {
+		return errors.New("peer is not registered")
+	}
+	if client.connT == TypeServer {
+		if err := client.Close(); err != nil {
+			client.conn.Close()
+		}
+	}
+	client.conn.Close()
+	delete(hub.clients, client.PeerId)
+
+	return nil
+}
+
+func (hub *Hub) UnregisterClient(client *Client) {
+	hub.unregister <- client
 }
 
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
@@ -87,45 +119,35 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			log.Println("[hub] shutdown")
 			return
 		case client := <-workerDoneErr:
-			hub.unregister <- client.PeerId
-			log.Println("[hub] stopped errored connection:", client.conn)
+			hub.unregisterClient(client)
+			log.Println("[hub] unregistered client:", client.PeerId)
 			// TODO start some reconnect goroutine?
 		case client := <-workerDoneOk:
-			hub.unregister <- client.PeerId
-			log.Println("[hub] stopped done connection:", client.conn)
+			hub.unregisterClient(client)
+			log.Println("[hub] unregistered client:", client.PeerId)
 		case client := <-hub.register:
-			if _, exist := hub.clients[client.PeerId]; exist {
-				log.Println("[hub] peer already registered:", client.PeerId)
+			if err := hub.registerClient(client); err != nil {
+				log.Printf("[hub] client %s register err: %s", client.PeerId, err)
 				continue
 			}
-			hub.clients[client.PeerId] = client
-			log.Printf("[hub] registered peer: %s", client.PeerId)
+			log.Println("[hub] registered client:", client.PeerId)
 			go readPeerMessages(
 				workerDoneOk,
 				workerDoneErr,
 				hub.recvMessage,
 				client,
 			)
-		case peerId := <-hub.unregister:
-			client, exist := hub.clients[peerId]
-			if !exist {
-				log.Println("[hub] peer is not registered:", peerId)
+		case client := <-hub.unregister:
+			if err := hub.unregisterClient(client); err != nil {
+				log.Printf("[hub] client %s unregister err:", err)
 				continue
 			}
-			if client.connT == TypeServer {
-				if err := client.Close(); err != nil {
-					log.Println("[hub] close client connection:", err)
-					client.conn.Close()
-				}
-			}
-			delete(hub.clients, peerId)
-			log.Println("[hub] unregistered peer:", peerId)
+			log.Println("[hub] unregistered client:", client.PeerId)
 		case msg := <-hub.sendMessage:
 			if client, exist := hub.clients[msg.toPeerId]; exist {
 				if err := client.conn.WriteMessage(websocket.TextMessage, []byte(msg.txt)); err != nil {
-					log.Println("[hub] message write:", err)
+					log.Println("[hub] message write err:", err)
 				}
-				log.Println("message sent:", msg.txt, client.connT)
 			} else {
 				log.Println("[hub] peer unknown:", msg.toPeerId)
 			}

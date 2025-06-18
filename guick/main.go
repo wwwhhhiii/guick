@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -55,26 +57,36 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO remove
-	curPeerId = peerId
+	client := &Client{PeerId: peerId, conn: conn, connT: TypeServer}
+	if client.PeerId == wsh.peerId {
+		log.Println("[serve] tried to connect to self, closing...")
+		if err := client.Close(); err != nil {
+			log.Println("[serve] client close err:", err)
+		}
+		client.conn.Close()
+		return
+	}
 
-	wsh.hub.register <- &Client{PeerId: peerId, conn: conn, connT: TypeServer}
+	wsh.hub.register <- client
 }
 
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
+	log.Printf("[connect] connecting to %s...", addr)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
 		log.Println("[connect] peer connect err:", err)
 		return nil, err
 	}
 
+	log.Println("[connect] sending out peer id...")
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
 		log.Println("[connect] peer id write err:", err)
 		return nil, err
 	}
 
+	log.Println("[connect] waiting for their peer id...")
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Println("[connect] read peer id err:", err)
@@ -86,20 +98,47 @@ func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 		log.Printf("[connect] error parsing UUID: %v (%b)", err, msg)
 		return nil, err
 	}
+	client := &Client{PeerId: peerId, conn: conn, connT: TypeClient}
+	if client.PeerId == ourPeerId {
+		log.Println("[connect] tried to connect to self, closing...")
+		if err := client.Close(); err != nil {
+			log.Println("[connect] client close err:", err)
+			return nil, err
+		}
+		client.conn.Close()
+		return nil, errors.New("self connection")
+	}
 
-	// TODO remove
-	curPeerId = peerId
-
-	return &Client{PeerId: peerId, conn: conn, connT: TypeClient}, nil
+	return client, nil
 }
 
-func reconnect(oldConn *websocket.Conn) (*websocket.Conn, error) {
-
-	return nil, nil
+func showModalPopup(txt string, onCanvas fyne.Canvas) {
+	var modal *widget.PopUp
+	popupContent := container.NewVBox(
+		widget.NewLabel(txt),
+		widget.NewButton("Close", func() {
+			modal.Hide()
+		}),
+	)
+	modal = widget.NewModalPopUp(
+		popupContent,
+		onCanvas,
+	)
+	modal.Show()
 }
 
 func main() {
 	flag.Parse()
+	host, _, err := net.SplitHostPort(*addr)
+	if err != nil {
+		log.Printf("invalid listen address: %s, expected <host>:<port>", *addr)
+		return
+	}
+	peerIP := net.ParseIP(host)
+	if peerIP == nil {
+		log.Println("invalid listen address:", host)
+		return
+	}
 
 	ourPeerId := uuid.New()
 	log.Println("[main] our peer id:", ourPeerId)
@@ -119,34 +158,73 @@ func main() {
 	window := app.NewWindow("Guic")
 	window.Resize(fyne.NewSize(500, 500))
 
-	clientEntry := widget.NewEntry()
-	clientEntry.SetPlaceHolder("Peer IP")
+	peerEntry := widget.NewEntry()
+	peerEntry.SetPlaceHolder("Peer IP")
+
+	// just for conversion from fyne list id to peer UUID
+	fynePeers := []uuid.UUID{}
+	peerList := widget.NewList(
+		func() int { return len(fynePeers) },
+		func() fyne.CanvasObject {
+			return widget.NewLabel("")
+		},
+		func(lii widget.ListItemID, co fyne.CanvasObject) {
+			peerId := fynePeers[lii]
+			if peerId == uuid.Nil {
+				return
+			}
+			client, exist := hub.clients[peerId]
+			if !exist {
+				log.Fatalf("not found client by selected peer id: %s", peerId)
+			}
+			co.(*widget.Label).SetText(client.conn.RemoteAddr().String())
+		},
+	)
+	peerList.OnSelected = func(id widget.ListItemID) {
+		peerId := fynePeers[id]
+		if peerId == uuid.Nil {
+			return
+		}
+		curPeerId = peerId
+		log.Println("current peer id", curPeerId)
+	}
 
 	connContainer := container.New(
 		layout.NewVBoxLayout(),
-		clientEntry,
+		peerEntry,
 		widget.NewButton("Connect", func() {
-			if clientEntry.Text == "" {
+			if peerEntry.Text == "" {
 				return
 			}
-			host, _, err := net.SplitHostPort(clientEntry.Text)
+			host, _, err := net.SplitHostPort(peerEntry.Text)
 			if err != nil {
-				log.Println("invalid peer address:", clientEntry.Text)
+				errTxt := fmt.Sprintf("invalid peer address: %s", err)
+				log.Println(errTxt)
+				showModalPopup(errTxt, window.Canvas())
 				return
 			}
 			peerIP := net.ParseIP(host)
 			if peerIP == nil {
-				log.Println("invalid peer address:", clientEntry.Text)
+				errTxt := "incorrect IP address format"
+				log.Println(errTxt)
+				showModalPopup(errTxt, window.Canvas())
 				return
 			}
-			req, err := connect(clientEntry.Text, ourPeerId)
+			client, err := connect(peerEntry.Text, ourPeerId)
 			if err != nil {
-				// TODO do some error pop-up
+				showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
 				return
 			}
-			hub.register <- req
-			clientEntry.SetText("")
+			hub.register <- client
+			peerEntry.SetText("")
+			fynePeers = append(fynePeers, client.PeerId)
+			peerList.Refresh()
+			showModalPopup(
+				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
+				window.Canvas(),
+			)
 		}),
+		peerList,
 	)
 
 	textEntry := widget.NewEntry()
