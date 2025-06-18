@@ -25,6 +25,9 @@ var addr = flag.String("addr", "localhost:8080", "http server address")
 var upgrader = websocket.Upgrader{}
 var curPeerId = uuid.Nil
 
+// just for conversion from fyne list id to peer UUID
+var fynePeers = []uuid.UUID{}
+
 type wsServeHandler struct {
 	hub    *Hub
 	peerId uuid.UUID
@@ -68,6 +71,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wsh.hub.register <- client
+	fynePeers = append(fynePeers, client.PeerId)
 }
 
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
@@ -161,8 +165,6 @@ func main() {
 	peerEntry := widget.NewEntry()
 	peerEntry.SetPlaceHolder("Peer IP")
 
-	// just for conversion from fyne list id to peer UUID
-	fynePeers := []uuid.UUID{}
 	peerList := widget.NewList(
 		func() int { return len(fynePeers) },
 		func() fyne.CanvasObject {
