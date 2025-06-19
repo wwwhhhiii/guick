@@ -10,9 +10,27 @@ import (
 )
 
 type Msg struct {
-	fromPeerId uuid.UUID
-	toPeerId   uuid.UUID
-	txt        string
+	FromPeerId   uuid.UUID
+	ToPeerId     uuid.UUID
+	FromPeerAddr string
+	ToPeerAddr   string
+	Txt          string
+}
+
+func NewMsg(
+	txt string,
+	fromPeerId uuid.UUID,
+	toPeerId uuid.UUID,
+	fromPeerAddr string,
+	toPeerAddr string,
+) *Msg {
+	return &Msg{
+		Txt:          txt,
+		FromPeerId:   fromPeerId,
+		ToPeerId:     toPeerId,
+		FromPeerAddr: fromPeerAddr,
+		ToPeerAddr:   toPeerAddr,
+	}
 }
 
 type Hub struct {
@@ -42,9 +60,18 @@ type Hub struct {
 	// Sends messages that were received from peers.
 	// Use this to receive messages from peers
 	OnMsgRecv chan<- *Msg
+
+	// Sends messages that were sent to peer.
+	// Use this to receive messages that you sent
+	OnMsgSent chan<- *Msg
 }
 
-func newHub(onClientReg chan<- *Client, onClientUnreg chan<- *Client, onMsgRecv chan<- *Msg) *Hub {
+func newHub(
+	onClientReg chan<- *Client,
+	onClientUnreg chan<- *Client,
+	onMsgRecv chan<- *Msg,
+	onMsgSent chan<- *Msg,
+) *Hub {
 	return &Hub{
 		clients:       make(map[uuid.UUID]*Client, 100),
 		register:      make(chan *Client),
@@ -54,6 +81,7 @@ func newHub(onClientReg chan<- *Client, onClientUnreg chan<- *Client, onMsgRecv 
 		OnClientReg:   onClientReg,
 		OnClientUnreg: onClientUnreg,
 		OnMsgRecv:     onMsgRecv,
+		OnMsgSent:     onMsgSent,
 	}
 }
 
@@ -80,7 +108,13 @@ func readPeerMessages(
 			doneErr <- peer
 			return
 		}
-		hubRecv <- &Msg{fromPeerId: peer.PeerId, txt: string(txt)}
+		hubRecv <- NewMsg(
+			string(txt),
+			peer.PeerId,
+			uuid.Nil, // TODO here should be our uuid
+			peer.conn.RemoteAddr().String(),
+			peer.conn.LocalAddr().String(),
+		)
 	}
 }
 
@@ -131,6 +165,10 @@ func (hub *Hub) emitRecvMsg(msg *Msg) {
 	hub.OnMsgRecv <- msg
 }
 
+func (hub *Hub) emitSentMsg(msg *Msg) {
+	hub.OnMsgSent <- msg
+}
+
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	defer close(hub.register)
 	defer close(hub.unregister)
@@ -172,15 +210,17 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 			log.Println("[hub] unregistered client:", client.PeerId)
 		case msg := <-hub.sendMessage:
-			if client, exist := hub.clients[msg.toPeerId]; exist {
-				if err := client.conn.WriteMessage(websocket.TextMessage, []byte(msg.txt)); err != nil {
+			if client, exist := hub.clients[msg.ToPeerId]; exist {
+				if err := client.conn.WriteMessage(websocket.TextMessage, []byte(msg.Txt)); err != nil {
 					log.Println("[hub] message write err:", err)
+					continue
 				}
+				go hub.emitSentMsg(msg)
 			} else {
-				log.Println("[hub] peer unknown:", msg.toPeerId)
+				log.Println("[hub] peer unknown:", msg.ToPeerId)
 			}
 		case msg := <-hub.recvMessage:
-			log.Printf("[%s]: %s", msg.fromPeerId, msg.txt)
+			log.Printf("[%s]: %s", msg.FromPeerId, msg.Txt)
 			go hub.emitRecvMsg(msg)
 		}
 	}

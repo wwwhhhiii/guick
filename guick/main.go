@@ -17,16 +17,23 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
 var addr = flag.String("addr", "localhost:8080", "http server address")
 var upgrader = websocket.Upgrader{}
+
+var ourPeerId = uuid.New()
+
+// current peer to send messages to
 var curPeerId = uuid.Nil
+var curPeerScroll *container.Scroll = nil
 
 // just for conversion from fyne list id to peer UUID
-var fynePeers = []uuid.UUID{}
+var fyneListPeers = []uuid.UUID{}
+
+// peer chat containers to switch when switching current peer
+var peerScrollWindows = make(map[uuid.UUID]*container.Scroll)
 
 type wsServeHandler struct {
 	hub    *Hub
@@ -60,6 +67,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO should be NewClient constructor
 	client := &Client{PeerId: peerId, conn: conn, connT: TypeServer}
 	if client.PeerId == wsh.peerId {
 		log.Println("[serve] tried to connect to self, closing...")
@@ -146,13 +154,13 @@ func main() {
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
 	onRecvMessage := make(chan *Msg)
-	hub := newHub(onClientRegistered, onClientUnregistered, onRecvMessage)
+	onSentMessage := make(chan *Msg)
+	hub := newHub(onClientRegistered, onClientUnregistered, onRecvMessage, onSentMessage)
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 	go hub.Run(interrupt)
 
-	ourPeerId := uuid.New()
 	log.Println("[main] our peer id:", ourPeerId)
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
@@ -167,12 +175,12 @@ func main() {
 	peerEntry.SetPlaceHolder("Peer IP")
 
 	peerList := widget.NewList(
-		func() int { return len(fynePeers) },
+		func() int { return len(fyneListPeers) },
 		func() fyne.CanvasObject {
 			return widget.NewLabel("")
 		},
 		func(lii widget.ListItemID, co fyne.CanvasObject) {
-			peerId := fynePeers[lii]
+			peerId := fyneListPeers[lii]
 			if peerId == uuid.Nil {
 				return
 			}
@@ -183,17 +191,8 @@ func main() {
 			co.(*widget.Label).SetText(client.conn.RemoteAddr().String())
 		},
 	)
-	peerList.OnSelected = func(id widget.ListItemID) {
-		peerId := fynePeers[id]
-		if peerId == uuid.Nil {
-			return
-		}
-		curPeerId = peerId
-		log.Println("current peer id", curPeerId)
-	}
 
-	connContainer := container.New(
-		layout.NewVBoxLayout(),
+	connEntry := container.NewVBox(
 		peerEntry,
 		widget.NewButton("Connect", func() {
 			if peerEntry.Text == "" {
@@ -226,25 +225,60 @@ func main() {
 				window.Canvas(),
 			)
 		}),
-		peerList,
+	)
+	connContainer := container.NewBorder(
+		connEntry, nil, nil, nil, peerList,
 	)
 
 	textEntry := widget.NewEntry()
 	textEntry.SetPlaceHolder("Enter a message")
-	comContainer := container.New(
-		layout.NewVBoxLayout(),
+	sendMessage := func(t string) {
+		if t == "" {
+			return
+		}
+		if curPeerId == uuid.Nil {
+			showModalPopup("Select peer", window.Canvas())
+			return
+		}
+		hub.sendMessage <- NewMsg(
+			t,
+			ourPeerId,
+			curPeerId,
+			hub.clients[curPeerId].conn.LocalAddr().String(),
+			hub.clients[curPeerId].conn.RemoteAddr().String(),
+		)
+		textEntry.SetText("")
+	}
+	textEntry.OnSubmitted = sendMessage
+	textSendEntry := container.NewVBox(
 		textEntry,
 		widget.NewButton("Send", func() {
 			if textEntry.Text == "" {
 				return
 			}
-			hub.sendMessage <- &Msg{fromPeerId: ourPeerId, txt: textEntry.Text, toPeerId: curPeerId}
-			textEntry.SetText("")
+			sendMessage(textEntry.Text)
 		}),
 	)
-	content := container.NewBorder(
-		nil, nil, connContainer, nil, comContainer,
+	placeholderScroll := container.NewScroll(widget.NewTextGrid())
+	chatBorder := container.NewBorder(
+		nil, textSendEntry, nil, nil, placeholderScroll,
 	)
+	content := container.NewHSplit(connContainer, chatBorder)
+
+	peerList.OnSelected = func(id widget.ListItemID) {
+		peerId := fyneListPeers[id]
+		if peerId == uuid.Nil {
+			return
+		}
+		curPeerId = peerId
+		if _, exist := peerScrollWindows[curPeerId]; !exist {
+			peerScrollWindows[curPeerId] = container.NewScroll(widget.NewTextGrid())
+		}
+		curPeerScroll = peerScrollWindows[curPeerId]
+		chatBorder.Objects[0].(*container.Scroll).Hide()
+		chatBorder.Objects[0] = curPeerScroll
+		curPeerScroll.Show()
+	}
 
 	// UI async reactor
 	go func() {
@@ -252,29 +286,47 @@ func main() {
 			select {
 			case client := <-onClientRegistered:
 				log.Println("[UI reactor] client registered")
-				fynePeers = append(fynePeers, client.PeerId)
+				fyneListPeers = append(fyneListPeers, client.PeerId)
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
+				peerScrollWindows[client.PeerId] = container.NewScroll(widget.NewTextGrid())
 			case client := <-onClientUnregistered:
 				log.Println("[UI reactor] client unregistered")
-				delete := -1
-				for i, peerId := range fynePeers {
+				deleteIdx := -1
+				for i, peerId := range fyneListPeers {
 					if peerId == client.PeerId {
-						delete = i
+						deleteIdx = i
 						break
 					}
 				}
-				clientFound := delete != -1
+				clientFound := deleteIdx != -1
 				if clientFound {
-					fynePeers = append(fynePeers[:delete], fynePeers[delete+1:]...)
+					fyneListPeers = append(fyneListPeers[:deleteIdx], fyneListPeers[deleteIdx+1:]...)
 				}
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
+				delete(peerScrollWindows, client.PeerId)
+				// TODO delete opened textGrid of client if client was unregistered
 			case msg := <-onRecvMessage:
 				log.Println("[UI reactor] message received")
-				showModalPopup(msg.txt, window.Canvas())
+				fyne.Do(func() {
+					if scroll, exist := peerScrollWindows[msg.FromPeerId]; exist {
+						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
+					} else {
+						log.Fatalf("[UI reactor] error, no scroll peer found for %s", msg.FromPeerId)
+					}
+				})
+			case msg := <-onSentMessage:
+				log.Println("[UI reactor] message sent")
+				fyne.Do(func() {
+					if scroll, exist := peerScrollWindows[msg.ToPeerId]; exist {
+						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[me]: %s", msg.Txt))
+					} else {
+						log.Fatalf("[UI reactor] error, no scroll peer found for %s", msg.ToPeerAddr)
+					}
+				})
 			}
 		}
 	}()
