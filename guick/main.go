@@ -70,8 +70,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wsh.hub.register <- client
-	fynePeers = append(fynePeers, client.PeerId)
+	wsh.hub.RegisterClient(client)
 }
 
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
@@ -144,15 +143,17 @@ func main() {
 		return
 	}
 
-	ourPeerId := uuid.New()
-	log.Println("[main] our peer id:", ourPeerId)
-	hub := newHub()
+	onClientRegistered := make(chan *Client)
+	onClientUnregistered := make(chan *Client)
+	onRecvMessage := make(chan *Msg)
+	hub := newHub(onClientRegistered, onClientUnregistered, onRecvMessage)
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
-
 	go hub.Run(interrupt)
 
+	ourPeerId := uuid.New()
+	log.Println("[main] our peer id:", ourPeerId)
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
 	log.Println("[main] running server on", *addr)
@@ -212,15 +213,14 @@ func main() {
 				showModalPopup(errTxt, window.Canvas())
 				return
 			}
+			// TODO also need to check here if already connected
 			client, err := connect(peerEntry.Text, ourPeerId)
 			if err != nil {
 				showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
 				return
 			}
-			hub.register <- client
+			hub.RegisterClient(client)
 			peerEntry.SetText("")
-			fynePeers = append(fynePeers, client.PeerId)
-			peerList.Refresh()
 			showModalPopup(
 				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
 				window.Canvas(),
@@ -245,6 +245,39 @@ func main() {
 	content := container.NewBorder(
 		nil, nil, connContainer, nil, comContainer,
 	)
+
+	// UI async reactor
+	go func() {
+		for {
+			select {
+			case client := <-onClientRegistered:
+				log.Println("[UI reactor] client registered")
+				fynePeers = append(fynePeers, client.PeerId)
+				fyne.Do(func() {
+					peerList.Refresh()
+				})
+			case client := <-onClientUnregistered:
+				log.Println("[UI reactor] client unregistered")
+				delete := -1
+				for i, peerId := range fynePeers {
+					if peerId == client.PeerId {
+						delete = i
+						break
+					}
+				}
+				clientFound := delete != -1
+				if clientFound {
+					fynePeers = append(fynePeers[:delete], fynePeers[delete+1:]...)
+				}
+				fyne.Do(func() {
+					peerList.Refresh()
+				})
+			case msg := <-onRecvMessage:
+				log.Println("[UI reactor] message received")
+				showModalPopup(msg.txt, window.Canvas())
+			}
+		}
+	}()
 
 	window.SetContent(content)
 	window.Show()

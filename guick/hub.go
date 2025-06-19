@@ -25,20 +25,35 @@ type Hub struct {
 	// peer id to unregister and close connection to it
 	unregister chan *Client
 
-	// cominf from client
+	// coming from client
 	sendMessage chan *Msg
 
 	// coming from goroutine listening to peer messages
 	recvMessage chan *Msg
+
+	// Sends clients that were registered in hub.
+	// Use this to receive registred clients events
+	OnClientReg chan<- *Client
+
+	// Sends clients that were unregistered in hub.
+	// Use this to receive registered clients events
+	OnClientUnreg chan<- *Client
+
+	// Sends messages that were received from peers.
+	// Use this to receive messages from peers
+	OnMsgRecv chan<- *Msg
 }
 
-func newHub() *Hub {
+func newHub(onClientReg chan<- *Client, onClientUnreg chan<- *Client, onMsgRecv chan<- *Msg) *Hub {
 	return &Hub{
-		clients:     make(map[uuid.UUID]*Client, 100),
-		register:    make(chan *Client),
-		unregister:  make(chan *Client),
-		sendMessage: make(chan *Msg),
-		recvMessage: make(chan *Msg),
+		clients:       make(map[uuid.UUID]*Client, 100),
+		register:      make(chan *Client),
+		unregister:    make(chan *Client),
+		sendMessage:   make(chan *Msg),
+		recvMessage:   make(chan *Msg),
+		OnClientReg:   onClientReg,
+		OnClientUnreg: onClientUnreg,
+		OnMsgRecv:     onMsgRecv,
 	}
 }
 
@@ -95,11 +110,25 @@ func (hub *Hub) unregisterClient(c *Client) error {
 	client.conn.Close()
 	delete(hub.clients, client.PeerId)
 
+	go hub.emitClientUnreg(client)
+
 	return nil
 }
 
 func (hub *Hub) UnregisterClient(client *Client) {
 	hub.unregister <- client
+}
+
+func (hub *Hub) emitClientReg(client *Client) {
+	hub.OnClientReg <- client
+}
+
+func (hub *Hub) emitClientUnreg(client *Client) {
+	hub.OnClientUnreg <- client
+}
+
+func (hub *Hub) emitRecvMsg(msg *Msg) {
+	hub.OnMsgRecv <- msg
 }
 
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
@@ -119,18 +148,17 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			log.Println("[hub] shutdown")
 			return
 		case client := <-workerDoneErr:
-			hub.unregisterClient(client)
-			log.Println("[hub] unregistered client:", client.PeerId)
+			go hub.unregisterClient(client)
 			// TODO start some reconnect goroutine?
 		case client := <-workerDoneOk:
-			hub.unregisterClient(client)
-			log.Println("[hub] unregistered client:", client.PeerId)
+			go hub.unregisterClient(client)
 		case client := <-hub.register:
 			if err := hub.registerClient(client); err != nil {
 				log.Printf("[hub] client %s register err: %s", client.PeerId, err)
 				continue
 			}
 			log.Println("[hub] registered client:", client.PeerId)
+			go hub.emitClientReg(client)
 			go readPeerMessages(
 				workerDoneOk,
 				workerDoneErr,
@@ -153,7 +181,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 		case msg := <-hub.recvMessage:
 			log.Printf("[%s]: %s", msg.fromPeerId, msg.txt)
-			// 	// TODO push message to client
+			go hub.emitRecvMsg(msg)
 		}
 	}
 }
