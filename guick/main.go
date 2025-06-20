@@ -315,6 +315,9 @@ func main() {
 				delete(peerScrollWindows, client.PeerId)
 				// replace with placeholder to delete reference for current peer scroll from UI
 				chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
+				if client.PeerId == curPeerId {
+					curPeerId = uuid.Nil
+				}
 			case msg := <-onRecvMessage:
 				log.Println("[UI reactor] message received")
 				fyne.Do(func() {
