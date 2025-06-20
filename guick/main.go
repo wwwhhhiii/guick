@@ -20,7 +20,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-var addr = flag.String("addr", "localhost:8080", "http server address")
+var addr = flag.String("addr", "0.0.0.0:8080", "http server address")
 var upgrader = websocket.Upgrader{}
 
 var ourPeerId = uuid.New()
@@ -276,6 +276,8 @@ func main() {
 		}
 		curPeerScroll = peerScrollWindows[curPeerId]
 		chatBorder.Objects[0].(*container.Scroll).Hide()
+		// Here we reassigning inner object of chat, but not deleting the hidden element,
+		// because we keep reference to in in peerScrollWindows map
 		chatBorder.Objects[0] = curPeerScroll
 		curPeerScroll.Show()
 	}
@@ -308,7 +310,8 @@ func main() {
 					peerList.Refresh()
 				})
 				delete(peerScrollWindows, client.PeerId)
-				// TODO delete opened textGrid of client if client was unregistered
+				// replace with placeholder to delete reference for current peer scroll from UI
+				chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
 			case msg := <-onRecvMessage:
 				log.Println("[UI reactor] message received")
 				fyne.Do(func() {
