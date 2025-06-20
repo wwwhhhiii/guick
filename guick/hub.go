@@ -170,7 +170,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			go hub.unregisterClient(client)
 		case client := <-hub.register:
 			if err := hub.registerClient(client); err != nil {
-				log.Printf("[hub] client %s register err: %s", client.PeerId, err)
+				log.Printf("[hub] reister err: %s", err)
 				continue
 			}
 			log.Println("[hub] registered client:", client.PeerId)
@@ -182,22 +182,25 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			)
 		case client := <-hub.unregister:
 			if err := hub.unregisterClient(client); err != nil {
-				log.Printf("[hub] client %s unregister err:", err)
+				log.Printf("[hub] unregister err: %s", err)
 				continue
 			}
 			log.Println("[hub] unregistered client:", client.PeerId)
 		case msg := <-hub.sendMessage:
-			if client, exist := hub.clients[msg.ToPeerId]; exist {
-				if err := client.conn.WriteMessage(websocket.TextMessage, []byte(msg.Txt)); err != nil {
-					log.Println("[hub] message write err:", err)
-					continue
-				}
-				go hub.emitSentMsg(msg)
-			} else {
-				log.Println("[hub] peer unknown:", msg.ToPeerId)
+			client, exist := hub.clients[msg.ToPeerId]
+			if !exist {
+				log.Fatal("[hub] peer unknown:", msg.ToPeerId)
 			}
+			w, err := client.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				log.Fatalf("writer get err: %s", err)
+			}
+			w.Write([]byte(msg.Txt))
+			if err := w.Close(); err != nil {
+				log.Fatalf("writer close err: %s", err)
+			}
+			go hub.emitSentMsg(msg)
 		case msg := <-hub.recvMessage:
-			log.Printf("[%s]: %s", msg.FromPeerId, msg.Txt)
 			go hub.emitRecvMsg(msg)
 		}
 	}
