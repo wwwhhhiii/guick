@@ -129,12 +129,14 @@ func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 }
 
 func showModalPopup(txt string, onCanvas fyne.Canvas) {
+	// TODO maybe make this a temporary modal that is overwritten
 	var modal *widget.PopUp
+	closeBtn := widget.NewButton("Close", func() {
+		modal.Hide()
+	})
 	popupContent := container.NewVBox(
 		widget.NewLabel(txt),
-		widget.NewButton("Close", func() {
-			modal.Hide()
-		}),
+		closeBtn,
 	)
 	modal = widget.NewModalPopUp(
 		popupContent,
@@ -256,14 +258,17 @@ func main() {
 		textEntry.SetText("")
 	}
 	textEntry.OnSubmitted = sendMessage
+	textEntryBtn := widget.NewButton("Send", func() {
+		if textEntry.Text == "" {
+			return
+		}
+		sendMessage(textEntry.Text)
+	})
+	textEntry.Disable()
+	textEntryBtn.Disable()
 	textSendEntry := container.NewVBox(
 		textEntry,
-		widget.NewButton("Send", func() {
-			if textEntry.Text == "" {
-				return
-			}
-			sendMessage(textEntry.Text)
-		}),
+		textEntryBtn,
 	)
 	placeholderScroll := container.NewScroll(widget.NewTextGrid())
 	chatBorder := container.NewBorder(
@@ -286,7 +291,11 @@ func main() {
 		// because we still want to show it later
 		chatBorder.Objects[0] = curPeerScroll
 		curPeerScroll.Show()
+		textEntry.Enable()
+		textEntryBtn.Enable()
 	}
+	// TODO handle list element unselected
+	// peerList.OnUnselected
 
 	// UI reactor
 	go func() {
@@ -320,6 +329,11 @@ func main() {
 				chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
 				if client.PeerId == curPeerId {
 					curPeerId = uuid.Nil
+				}
+				curPeerUnselected := curPeerId == uuid.Nil
+				if curPeerUnselected {
+					textEntry.Disable()
+					textEntryBtn.Disable()
 				}
 			case msg := <-onRecvMessage:
 				log.Println("[UI reactor] message received")
