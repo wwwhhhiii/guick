@@ -13,15 +13,22 @@ const (
 )
 
 type Client struct {
+
+	// client peer id
 	PeerId uuid.UUID
-	conn   *websocket.Conn
-	connT  ConnType
+
+	// connection with the client
+	conn *websocket.Conn
+
+	// Type of connection that was created. Either from server side or client side
+	connT ConnType
 }
 
-func NewClient(peerId uuid.UUID, conn *websocket.Conn) *Client {
+func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType) *Client {
 	return &Client{
 		PeerId: peerId,
 		conn:   conn,
+		connT:  connT,
 	}
 }
 

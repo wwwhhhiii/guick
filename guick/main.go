@@ -27,12 +27,14 @@ var ourPeerId = uuid.New()
 
 // current peer to send messages to
 var curPeerId = uuid.Nil
+
+// current peer scroll to show and append sent/recv messages to
 var curPeerScroll *container.Scroll = nil
 
-// just for conversion from fyne list id to peer UUID
+// a slice just for conversion between fyne list id to app peer UUID
 var fyneListPeers = []uuid.UUID{}
 
-// peer chat containers to switch when switching current peer
+// peer chat containers to select from when selecting current peer in UI
 var peerScrollWindows = make(map[uuid.UUID]*container.Scroll)
 
 type wsServeHandler struct {
@@ -40,47 +42,48 @@ type wsServeHandler struct {
 	peerId uuid.UUID
 }
 
+// serve incoming peers connections. register connected peers in a hub
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
-	// if we are here, it means we got a request to connect to our websocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("[serve] upgrade:", err)
 	}
 
-	// we receive their peer id
+	// if we recv client connection,
+	// firstly we wait for peer id from the client
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Println("[serve] read peer id err:", err)
 		return
 	}
-	log.Println("[serve] incoming connection from peer:", string(msg))
-	// we send our peer id
-	err = conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
-	if err != nil {
-		log.Println("[serve] error sending peer id:", err)
-		return
-	}
-
 	peerId, err := uuid.ParseBytes(msg)
 	if err != nil {
 		log.Println("[serve] error parsing UUID", err)
 		return
 	}
 
-	// TODO should be NewClient constructor
-	client := &Client{PeerId: peerId, conn: conn, connT: TypeServer}
-	if client.PeerId == wsh.peerId {
-		log.Println("[serve] tried to connect to self, closing...")
-		if err := client.Close(); err != nil {
-			log.Println("[serve] client close err:", err)
-		}
-		client.conn.Close()
+	log.Println("[serve] incoming connection from peer:", string(msg))
+
+	if peerId == wsh.peerId {
+		log.Println("[serve] tried to connect to self, closing connection...")
+		conn.Close()
 		return
 	}
 
-	wsh.hub.RegisterClient(client)
+	// then we respond with our peer id
+	err = conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
+	if err != nil {
+		log.Println("[serve] error sending peer id:", err)
+		return
+	}
+
+	// TODO here we assuming that we are ok after sending our peer id,
+	// but we may be not ok if the client did not recv our peer id, (or some other err occured)
+	// so we need some response that he registered us?
+	wsh.hub.RegisterClient(NewClient(peerId, conn, TypeServer))
 }
 
+// connect to peers. returns peer as client struct
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	log.Printf("[connect] connecting to %s...", addr)
@@ -90,37 +93,33 @@ func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 		return nil, err
 	}
 
-	log.Println("[connect] sending out peer id...")
+	log.Println("[connect] sending our peer id...")
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
-		log.Println("[connect] peer id write err:", err)
+		log.Println("[connect] peer id send err:", err)
 		return nil, err
 	}
 
-	log.Println("[connect] waiting for their peer id...")
+	log.Println("[connect] waiting for server peer id...")
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("[connect] read peer id err:", err)
+		log.Println("[connect] read server peer id err:", err)
 		return nil, err
 	}
 
-	peerId, err := uuid.ParseBytes(msg)
+	serverPeerId, err := uuid.ParseBytes(msg)
 	if err != nil {
-		log.Printf("[connect] error parsing UUID: %v (%b)", err, msg)
+		log.Printf("[connect] server peer id parse err: %v (%b)", err, msg)
 		return nil, err
 	}
-	client := &Client{PeerId: peerId, conn: conn, connT: TypeClient}
-	if client.PeerId == ourPeerId {
+
+	if serverPeerId == ourPeerId {
 		log.Println("[connect] tried to connect to self, closing...")
-		if err := client.Close(); err != nil {
-			log.Println("[connect] client close err:", err)
-			return nil, err
-		}
-		client.conn.Close()
+		conn.Close()
 		return nil, errors.New("self connection")
 	}
 
-	return client, nil
+	return NewClient(serverPeerId, conn, TypeClient), nil
 }
 
 func showModalPopup(txt string, onCanvas fyne.Canvas) {
@@ -276,13 +275,13 @@ func main() {
 		}
 		curPeerScroll = peerScrollWindows[curPeerId]
 		chatBorder.Objects[0].(*container.Scroll).Hide()
-		// Here we reassigning inner object of chat, but not deleting the hidden element,
-		// because we keep reference to in in peerScrollWindows map
+		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
+		// because we still want to show it later
 		chatBorder.Objects[0] = curPeerScroll
 		curPeerScroll.Show()
 	}
 
-	// UI async reactor
+	// UI reactor
 	go func() {
 		for {
 			select {

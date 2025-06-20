@@ -9,6 +9,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// TODO s:
+//
+// - buffered channel for reading and writing messages
+// - impl ping-pong and read timeout
+
 type Msg struct {
 	FromPeerId   uuid.UUID
 	ToPeerId     uuid.UUID
