@@ -20,6 +20,11 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// TODOS
+//
+// - add submit event to connection entry
+// - add submit functionality for modal popup
+
 var addr = flag.String("addr", "0.0.0.0", "http server address")
 var port = flag.String("port", "8080", "http server port")
 var upgrader = websocket.Upgrader{}
@@ -188,39 +193,41 @@ func main() {
 		},
 	)
 
+	uiOnConnect := func() {
+		if peerEntry.Text == "" {
+			return
+		}
+		host, _, err := net.SplitHostPort(peerEntry.Text)
+		if err != nil {
+			errTxt := fmt.Sprintf("invalid peer address: %s", err)
+			log.Println(errTxt)
+			showModalPopup(errTxt, window.Canvas())
+			return
+		}
+		peerIP := net.ParseIP(host)
+		if peerIP == nil {
+			errTxt := "incorrect IP address format"
+			log.Println(errTxt)
+			showModalPopup(errTxt, window.Canvas())
+			return
+		}
+		// TODO also need to check here if already connected
+		client, err := connect(peerEntry.Text, ourPeerId)
+		if err != nil {
+			showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
+			return
+		}
+		hub.RegisterClient(client)
+		peerEntry.SetText("")
+		showModalPopup(
+			fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
+			window.Canvas(),
+		)
+	}
+	peerEntry.OnSubmitted = func(s string) { uiOnConnect() }
 	connEntry := container.NewVBox(
 		peerEntry,
-		widget.NewButton("Connect", func() {
-			if peerEntry.Text == "" {
-				return
-			}
-			host, _, err := net.SplitHostPort(peerEntry.Text)
-			if err != nil {
-				errTxt := fmt.Sprintf("invalid peer address: %s", err)
-				log.Println(errTxt)
-				showModalPopup(errTxt, window.Canvas())
-				return
-			}
-			peerIP := net.ParseIP(host)
-			if peerIP == nil {
-				errTxt := "incorrect IP address format"
-				log.Println(errTxt)
-				showModalPopup(errTxt, window.Canvas())
-				return
-			}
-			// TODO also need to check here if already connected
-			client, err := connect(peerEntry.Text, ourPeerId)
-			if err != nil {
-				showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
-				return
-			}
-			hub.RegisterClient(client)
-			peerEntry.SetText("")
-			showModalPopup(
-				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
-				window.Canvas(),
-			)
-		}),
+		widget.NewButton("Connect", uiOnConnect),
 	)
 	connContainer := container.NewBorder(
 		connEntry, nil, nil, nil, peerList,
