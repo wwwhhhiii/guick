@@ -243,6 +243,9 @@ func main() {
 			showModalPopup("Select peer", window.Canvas())
 			return
 		}
+		if _, exist := hub.clients[curPeerId]; !exist {
+			log.Fatalf("[ERROR] cur selected peer not found in hub: %s", curPeerId)
+		}
 		hub.sendMessage <- NewMsg(
 			t,
 			ourPeerId,
