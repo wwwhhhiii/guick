@@ -14,6 +14,12 @@ import (
 // - buffered channel for reading and writing messages
 // - impl ping-pong and read timeout
 
+// const (
+// 	maxMessageSize = 512
+
+// 	pongWait = 30 * time.Second
+// )
+
 type Msg struct {
 	FromPeerId   uuid.UUID
 	ToPeerId     uuid.UUID
@@ -87,39 +93,6 @@ func newHub(
 		OnClientUnreg: onClientUnreg,
 		OnMsgRecv:     onMsgRecv,
 		OnMsgSent:     onMsgSent,
-	}
-}
-
-// worker function that endlessly read messages from sebsocket connection.
-//
-// takes doneOk channel to signal that connection was closed normally.
-//
-// takes doneErr channel to signal that connection was closed unexpectedly.
-func readPeerMessages(
-	doneOk chan<- *Client,
-	doneErr chan<- *Client,
-	hubRecv chan<- *Msg,
-	peer *Client,
-) {
-	for {
-		_, txt, err := peer.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				log.Println("[read] connection closed:", err)
-				doneOk <- peer
-				return
-			}
-			log.Println("[read] connection unexpected close:", err)
-			doneErr <- peer
-			return
-		}
-		hubRecv <- NewMsg(
-			string(txt),
-			peer.PeerId,
-			uuid.Nil, // TODO here should be our uuid
-			peer.conn.RemoteAddr().String(),
-			peer.conn.LocalAddr().String(),
-		)
 	}
 }
 
@@ -202,11 +175,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 			log.Println("[hub] registered client:", client.PeerId)
 			go hub.emitClientReg(client)
-			go readPeerMessages(
+			go client.readMessages(
 				workerDoneOk,
 				workerDoneErr,
 				hub.recvMessage,
-				client,
 			)
 		case client := <-hub.unregister:
 			if err := hub.unregisterClient(client); err != nil {
@@ -234,10 +206,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 func (hub *Hub) Shutdown() {
 	delKeys := make([]uuid.UUID, len(hub.clients))
 	for _, client := range hub.clients {
-		if err := client.Close(); err != nil {
-			// its ok to get here, connection might be closed already
-			log.Printf("[hub] client entry clear: %v", err)
-		}
+		client.Close()
 		delKeys = append(delKeys, client.PeerId)
 	}
 	for _, key := range delKeys {
