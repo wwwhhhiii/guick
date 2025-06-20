@@ -20,7 +20,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-var addr = flag.String("addr", "0.0.0.0:8080", "http server address")
+var addr = flag.String("addr", "0.0.0.0", "http server address")
+var port = flag.String("port", "8080", "http server port")
 var upgrader = websocket.Upgrader{}
 
 var ourPeerId = uuid.New()
@@ -139,16 +140,12 @@ func showModalPopup(txt string, onCanvas fyne.Canvas) {
 
 func main() {
 	flag.Parse()
-	host, _, err := net.SplitHostPort(*addr)
-	if err != nil {
-		log.Printf("invalid listen address: %s, expected <host>:<port>", *addr)
-		return
-	}
-	peerIP := net.ParseIP(host)
+	peerIP := net.ParseIP(*addr)
 	if peerIP == nil {
-		log.Println("invalid listen address:", host)
+		log.Println("invalid listen address:", *addr)
 		return
 	}
+	serverAddr := fmt.Sprintf("%s:%s", *addr, *port)
 
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
@@ -163,8 +160,8 @@ func main() {
 	log.Println("[main] our peer id:", ourPeerId)
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	log.Println("[main] running server on", *addr)
-	go http.ListenAndServe(*addr, nil)
+	log.Println("[main] running server on", serverAddr)
+	go http.ListenAndServe(serverAddr, nil)
 
 	app := app.New()
 	window := app.NewWindow("Guic")
