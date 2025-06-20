@@ -22,7 +22,6 @@ import (
 
 // TODOS
 //
-// - add submit event to connection entry
 // - add submit functionality for modal popup
 
 var addr = flag.String("addr", "0.0.0.0", "http server address")
@@ -320,6 +319,7 @@ func main() {
 				clientFound := deleteIdx != -1
 				if clientFound {
 					fyneListPeers = append(fyneListPeers[:deleteIdx], fyneListPeers[deleteIdx+1:]...)
+					peerList.Unselect(widget.ListItemID(deleteIdx))
 				}
 				fyne.Do(func() {
 					peerList.Refresh()
@@ -327,11 +327,9 @@ func main() {
 				delete(peerScrollWindows, client.PeerId)
 				// replace with placeholder to delete reference for current peer scroll from UI
 				chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
-				if client.PeerId == curPeerId {
+				unregisteredSelectedPeer := client.PeerId == curPeerId
+				if unregisteredSelectedPeer {
 					curPeerId = uuid.Nil
-				}
-				curPeerUnselected := curPeerId == uuid.Nil
-				if curPeerUnselected {
 					textEntry.Disable()
 					textEntryBtn.Disable()
 				}
