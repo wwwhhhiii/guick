@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -65,11 +65,10 @@ func (c *Client) readMessages(
 		_, txt, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				log.Println("[read] connection closed:", err)
 				doneOk <- c
 				return
 			}
-			log.Println("[read] connection unexpected close:", err)
+			slog.Error("[read] connection unexpected close", "error", err)
 			doneErr <- c
 			return
 		}

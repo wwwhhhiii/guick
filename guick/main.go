@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -51,26 +52,27 @@ type wsServeHandler struct {
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("[serve] upgrade:", err)
+		slog.Error("[serve] upgrade", "error", err)
+		return
 	}
 
 	// if we recv client connection,
 	// firstly we wait for peer id from the client
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("[serve] read peer id err:", err)
+		slog.Error("[serve] read peer id", "error", err)
 		return
 	}
 	peerId, err := uuid.ParseBytes(msg)
 	if err != nil {
-		log.Println("[serve] error parsing UUID", err)
+		slog.Error("[serve] UUID parse", "error", err)
 		return
 	}
 
-	log.Println("[serve] incoming connection from peer:", string(msg))
+	slog.Info("[serve] incoming connection", "peer", string(msg))
 
 	if peerId == wsh.peerId {
-		log.Println("[serve] tried to connect to self, closing connection...")
+		slog.Error("[serve] tried to connect to self, closing connection...")
 		conn.Close()
 		return
 	}
@@ -78,7 +80,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// then we respond with our peer id
 	err = conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
 	if err != nil {
-		log.Println("[serve] error sending peer id:", err)
+		slog.Error("[serve] send peer id", "error", err)
 		return
 	}
 
@@ -91,35 +93,35 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 // connect to peers. returns peer as client struct
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
-	log.Printf("[connect] connecting to %s...", addr)
+	slog.Debug("[connect] peer connect", "addr", addr)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
-		log.Println("[connect] peer connect err:", err)
+		slog.Error("[connect] peer connect", "error", err)
 		return nil, err
 	}
 
-	log.Println("[connect] sending our peer id...")
+	slog.Debug("[connect] sending our peer id")
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
-		log.Println("[connect] peer id send err:", err)
+		slog.Error("[connect] peer id send", "error", err)
 		return nil, err
 	}
 
-	log.Println("[connect] waiting for server peer id...")
+	slog.Debug("[connect] waiting for server peer id...")
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("[connect] read server peer id err:", err)
+		slog.Error("[connect] read server peer id", "error", err)
 		return nil, err
 	}
 
 	serverPeerId, err := uuid.ParseBytes(msg)
 	if err != nil {
-		log.Printf("[connect] server peer id parse err: %v (%b)", err, msg)
+		slog.Error("[connect] server peer id parse", "error", err, "message", msg)
 		return nil, err
 	}
 
 	if serverPeerId == ourPeerId {
-		log.Println("[connect] tried to connect to self, closing...")
+		slog.Error("[connect] tried to connect to self, closing...")
 		conn.Close()
 		return nil, errors.New("self connection")
 	}
@@ -148,10 +150,11 @@ func main() {
 	flag.Parse()
 	peerIP := net.ParseIP(*addr)
 	if peerIP == nil {
-		log.Println("invalid listen address:", *addr)
+		slog.Error("Invalid listen addres:", "address", *addr)
 		return
 	}
 	serverAddr := fmt.Sprintf("%s:%s", *addr, *port)
+	slog.Info("[main]:", "ourPeerId", ourPeerId)
 
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
@@ -163,10 +166,9 @@ func main() {
 	signal.Notify(interrupt, os.Interrupt)
 	go hub.Run(interrupt)
 
-	log.Println("[main] our peer id:", ourPeerId)
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	log.Println("[main] running server on", serverAddr)
+	slog.Info("[main] running server on", "address", serverAddr)
 	go http.ListenAndServe(serverAddr, nil)
 
 	app := app.New()
@@ -301,14 +303,14 @@ func main() {
 		for {
 			select {
 			case client := <-onClientRegistered:
-				log.Println("[UI reactor] client registered")
+				slog.Debug("[UI reactor] registered", "client", client.PeerId)
 				fyneListPeers = append(fyneListPeers, client.PeerId)
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
 				peerScrollWindows[client.PeerId] = container.NewScroll(widget.NewTextGrid())
 			case client := <-onClientUnregistered:
-				log.Println("[UI reactor] client unregistered")
+				slog.Debug("[UI reactor] unregistered", "client", client.PeerId)
 				deleteIdx := -1
 				for i, peerId := range fyneListPeers {
 					if peerId == client.PeerId {
@@ -319,7 +321,9 @@ func main() {
 				clientFound := deleteIdx != -1
 				if clientFound {
 					fyneListPeers = append(fyneListPeers[:deleteIdx], fyneListPeers[deleteIdx+1:]...)
-					peerList.Unselect(widget.ListItemID(deleteIdx))
+					fyne.Do(func() {
+						peerList.Unselect(widget.ListItemID(deleteIdx))
+					})
 				}
 				fyne.Do(func() {
 					peerList.Refresh()
@@ -330,11 +334,13 @@ func main() {
 				unregisteredSelectedPeer := client.PeerId == curPeerId
 				if unregisteredSelectedPeer {
 					curPeerId = uuid.Nil
-					textEntry.Disable()
-					textEntryBtn.Disable()
+					fyne.Do(func() {
+						textEntry.Disable()
+						textEntryBtn.Disable()
+					})
 				}
 			case msg := <-onRecvMessage:
-				log.Println("[UI reactor] message received")
+				slog.Debug("[UI reactor] message received", "from", msg.FromPeerAddr)
 				fyne.Do(func() {
 					if scroll, exist := peerScrollWindows[msg.FromPeerId]; exist {
 						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
@@ -343,7 +349,7 @@ func main() {
 					}
 				})
 			case msg := <-onSentMessage:
-				log.Println("[UI reactor] message sent")
+				slog.Debug("[UI reactor] message sent", "to", msg.ToPeerAddr)
 				fyne.Do(func() {
 					if scroll, exist := peerScrollWindows[msg.ToPeerId]; exist {
 						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[me]: %s", msg.Txt))

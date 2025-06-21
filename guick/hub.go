@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log"
+	"log/slog"
 	"os"
 
 	"github.com/google/uuid"
@@ -159,9 +160,9 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	for {
 		select {
 		case <-interrupt:
-			log.Println("[hub] interrupted")
+			slog.Debug("[hub] interrupted")
 			hub.Shutdown()
-			log.Println("[hub] shutdown")
+			slog.Debug("[hub] shutdown")
 			return
 		case client := <-workerDoneErr:
 			go hub.unregisterClient(client)
@@ -170,10 +171,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			go hub.unregisterClient(client)
 		case client := <-hub.register:
 			if err := hub.registerClient(client); err != nil {
-				log.Printf("[hub] reister err: %s", err)
+				slog.Error("[hub] reister", "error", err)
 				continue
 			}
-			log.Println("[hub] registered client:", client.PeerId)
+			slog.Info("[hub] registered:", "client", client.PeerId)
 			go hub.emitClientReg(client)
 			go client.readMessages(
 				workerDoneOk,
@@ -182,10 +183,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			)
 		case client := <-hub.unregister:
 			if err := hub.unregisterClient(client); err != nil {
-				log.Printf("[hub] unregister err: %s", err)
+				slog.Error("[hub] unregister", "error", err)
 				continue
 			}
-			log.Println("[hub] unregistered client:", client.PeerId)
+			slog.Info("[hub] unregistered:", "client", client.PeerId)
 		case msg := <-hub.sendMessage:
 			client, exist := hub.clients[msg.ToPeerId]
 			if !exist {
