@@ -295,8 +295,19 @@ func main() {
 		textEntry.Enable()
 		textEntryBtn.Enable()
 	}
-	// TODO handle list element unselected
-	// peerList.OnUnselected
+	unselectPeer := func(peerId uuid.UUID) {
+		delete(peerScrollWindows, peerId)
+		// replace with placeholder to delete reference for current peer scroll from UI
+		chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
+		unregisteredSelectedPeer := peerId == curPeerId
+		if unregisteredSelectedPeer {
+			curPeerId = uuid.Nil
+			fyne.Do(func() {
+				textEntry.Disable()
+				textEntryBtn.Disable()
+			})
+		}
+	}
 
 	// UI reactor
 	go func() {
@@ -325,20 +336,7 @@ func main() {
 						peerList.Unselect(widget.ListItemID(deleteIdx))
 					})
 				}
-				fyne.Do(func() {
-					peerList.Refresh()
-				})
-				delete(peerScrollWindows, client.PeerId)
-				// replace with placeholder to delete reference for current peer scroll from UI
-				chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
-				unregisteredSelectedPeer := client.PeerId == curPeerId
-				if unregisteredSelectedPeer {
-					curPeerId = uuid.Nil
-					fyne.Do(func() {
-						textEntry.Disable()
-						textEntryBtn.Disable()
-					})
-				}
+				unselectPeer(client.PeerId)
 			case msg := <-onRecvMessage:
 				slog.Debug("[UI reactor] message received", "from", msg.FromPeerAddr)
 				fyne.Do(func() {
