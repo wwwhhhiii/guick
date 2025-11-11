@@ -15,6 +15,10 @@ const (
 	TypeClient
 )
 
+const (
+	maxMessageSizeBytes = 512
+)
+
 type Client struct {
 
 	// client peer id
@@ -35,26 +39,16 @@ func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType) *Client {
 	}
 }
 
-// stops the underlying client worker that works on client websocket,
-// closes websocket connection
-func (c *Client) Close() error {
+// gracefully closes client websocket connection
+func (c *Client) GracefulDisconnect() error {
 	return c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
 		websocket.CloseNormalClosure, ""),
 	)
 }
 
-// TODO add work flag mb
 // continiously reads client messages until error occurs or connection is closed
 func (c *Client) readMessages(hubRecv chan<- *Msg) error {
-	// TODO implement later
-	// peer.conn.SetReadLimit(maxMessageSize)
-	// // set pong deadline for first message,
-	// // because handler starts after reading first message
-	// peer.conn.SetReadDeadline(time.Now().Add(pongWait))
-	// peer.conn.SetPongHandler(func(appData string) error {
-	// 	peer.conn.SetReadDeadline(time.Now().Add(pongWait))
-	// 	return nil
-	// })
+	c.conn.SetReadLimit(maxMessageSizeBytes)
 	for {
 		_, txt, err := c.conn.ReadMessage()
 		if err != nil {

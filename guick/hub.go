@@ -15,12 +15,6 @@ import (
 // - buffered channel for reading and writing messages
 // - impl ping-pong and read timeout
 
-// const (
-// 	maxMessageSize = 512
-
-// 	pongWait = 30 * time.Second
-// )
-
 type Msg struct {
 	FromPeerId   uuid.UUID
 	ToPeerId     uuid.UUID
@@ -121,18 +115,12 @@ func (hub *Hub) registerClient(c *Client) error {
 // closes connection with the client.
 // deletes client record from a hub.
 // emits client unregistered event.
-func (hub *Hub) disconnectClient(c *Client) error {
-	if c.connT == TypeServer {
-		if err := c.Close(); err != nil {
-			c.conn.Close()
-		}
+func (hub *Hub) disconnectClient(client *Client) error {
+	if err := client.GracefulDisconnect(); err != nil {
+		client.conn.Close()
 	}
-	c.conn.Close()
-	_, exist := hub.clients[c.PeerId]
-	if exist {
-		delete(hub.clients, c.PeerId)
-	}
-	hub.OnClientUnreg <- c
+	delete(hub.clients, client.PeerId)
+	hub.OnClientUnreg <- client
 	return nil
 }
 
@@ -140,7 +128,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	for {
 		select {
 		case <-interrupt:
-			slog.Debug("hub interrupted")
+			slog.Info("hub interrupted")
 			hub.Shutdown()
 			return
 		case client := <-hub.register:
@@ -149,7 +137,6 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				continue
 			}
 			slog.Info("client registered", "client", client.PeerId, "location", "hub")
-			hub.OnClientReg <- client
 			go func() {
 				err := client.readMessages(hub.recvMessage)
 				if err != nil {
@@ -160,6 +147,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 					slog.Error(err.Error(), "location", "hub")
 				}
 			}()
+			hub.OnClientReg <- client
 		case client := <-hub.unregister:
 			if err := hub.disconnectClient(client); err != nil {
 				slog.Error("client unregister error", "error", err, "location", "hub")
@@ -171,6 +159,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if !exist {
 				log.Fatal("unknown peer", msg.ToPeerId)
 			}
+			// TODO add write deadline
 			w, err := client.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				log.Fatalf("writer get err: %s", err)
@@ -189,7 +178,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 func (hub *Hub) Shutdown() {
 	delKeys := make([]uuid.UUID, len(hub.clients))
 	for _, client := range hub.clients {
-		client.Close()
+		client.GracefulDisconnect()
 		delKeys = append(delKeys, client.PeerId)
 	}
 	for _, key := range delKeys {
