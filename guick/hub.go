@@ -61,7 +61,7 @@ type Hub struct {
 	// coming from goroutine listening to peer messages
 	recvMessage chan *Msg
 
-	// Sends clients that were registered in hub.
+	// Clients successfuly registered in hub are sent here.
 	// Use this to receive registred clients events
 	OnClientReg chan<- *Client
 
@@ -86,10 +86,10 @@ func newHub(
 ) *Hub {
 	return &Hub{
 		clients:       make(map[uuid.UUID]*Client, 100),
-		register:      make(chan *Client),
-		unregister:    make(chan *Client),
-		sendMessage:   make(chan *Msg),
-		recvMessage:   make(chan *Msg),
+		register:      make(chan *Client, 100),
+		unregister:    make(chan *Client, 100),
+		sendMessage:   make(chan *Msg, 100),
+		recvMessage:   make(chan *Msg, 100),
 		OnClientReg:   onClientReg,
 		OnClientUnreg: onClientUnreg,
 		OnMsgRecv:     onMsgRecv,
@@ -97,100 +97,79 @@ func newHub(
 	}
 }
 
+// use this to add new clients to hub.
+// client should be connected
+func (hub *Hub) RegisterClient(client *Client) {
+	hub.register <- client
+}
+
+// use this to delete clients from hub.
+// wil disconnect client and do all necessary cleanups
+func (hub *Hub) UnregisterClient(client *Client) {
+	hub.unregister <- client
+}
+
+// adds client record to hub registry
 func (hub *Hub) registerClient(c *Client) error {
 	if _, exist := hub.clients[c.PeerId]; exist {
 		return errors.New("peer already registered")
 	}
 	hub.clients[c.PeerId] = c
-
 	return nil
 }
 
-func (hub *Hub) RegisterClient(client *Client) {
-	hub.register <- client
-}
-
-func (hub *Hub) unregisterClient(c *Client) error {
-	client, exist := hub.clients[c.PeerId]
-	if !exist {
-		return errors.New("peer is not registered")
-	}
-	if client.connT == TypeServer {
-		if err := client.Close(); err != nil {
-			client.conn.Close()
+// closes connection with the client.
+// deletes client record from a hub.
+// emits client unregistered event.
+func (hub *Hub) disconnectClient(c *Client) error {
+	if c.connT == TypeServer {
+		if err := c.Close(); err != nil {
+			c.conn.Close()
 		}
 	}
-	client.conn.Close()
-	delete(hub.clients, client.PeerId)
-
-	go hub.emitClientUnreg(client)
-
+	c.conn.Close()
+	_, exist := hub.clients[c.PeerId]
+	if exist {
+		delete(hub.clients, c.PeerId)
+	}
+	hub.OnClientUnreg <- c
 	return nil
-}
-
-func (hub *Hub) UnregisterClient(client *Client) {
-	hub.unregister <- client
-}
-
-func (hub *Hub) emitClientReg(client *Client) {
-	hub.OnClientReg <- client
-}
-
-func (hub *Hub) emitClientUnreg(client *Client) {
-	hub.OnClientUnreg <- client
-}
-
-func (hub *Hub) emitRecvMsg(msg *Msg) {
-	hub.OnMsgRecv <- msg
-}
-
-func (hub *Hub) emitSentMsg(msg *Msg) {
-	hub.OnMsgSent <- msg
 }
 
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
-	defer close(hub.register)
-	defer close(hub.unregister)
-	defer close(hub.sendMessage)
-	defer close(hub.recvMessage)
-
-	workerDoneOk := make(chan *Client)
-	workerDoneErr := make(chan *Client)
-
 	for {
 		select {
 		case <-interrupt:
-			slog.Debug("[hub] interrupted")
+			slog.Debug("hub interrupted")
 			hub.Shutdown()
-			slog.Debug("[hub] shutdown")
 			return
-		case client := <-workerDoneErr:
-			go hub.unregisterClient(client)
-			// TODO start some reconnect goroutine?
-		case client := <-workerDoneOk:
-			go hub.unregisterClient(client)
 		case client := <-hub.register:
 			if err := hub.registerClient(client); err != nil {
-				slog.Error("[hub] reister", "error", err)
+				slog.Error("client register error", "error", err, "location", "hub")
 				continue
 			}
-			slog.Info("[hub] registered:", "client", client.PeerId)
-			go hub.emitClientReg(client)
-			go client.readMessages(
-				workerDoneOk,
-				workerDoneErr,
-				hub.recvMessage,
-			)
+			slog.Info("client registered", "client", client.PeerId, "location", "hub")
+			hub.OnClientReg <- client
+			go func() {
+				err := client.readMessages(hub.recvMessage)
+				if err != nil {
+					// TODO start some reconnect goroutine?
+				}
+				// connection is useless by now, so just disconnect and cleanup client
+				if err := hub.disconnectClient(client); err != nil {
+					slog.Error(err.Error(), "location", "hub")
+				}
+			}()
 		case client := <-hub.unregister:
-			if err := hub.unregisterClient(client); err != nil {
-				slog.Error("[hub] unregister", "error", err)
+			if err := hub.disconnectClient(client); err != nil {
+				slog.Error("client unregister error", "error", err, "location", "hub")
 				continue
 			}
-			slog.Info("[hub] unregistered:", "client", client.PeerId)
+			slog.Info("client unregistered", "client", client.PeerId, "location", "hub")
 		case msg := <-hub.sendMessage:
 			client, exist := hub.clients[msg.ToPeerId]
 			if !exist {
-				log.Fatal("[hub] peer unknown:", msg.ToPeerId)
+				log.Fatal("unknown peer", msg.ToPeerId)
 			}
 			w, err := client.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
@@ -200,9 +179,9 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if err := w.Close(); err != nil {
 				log.Fatalf("writer close err: %s", err)
 			}
-			go hub.emitSentMsg(msg)
+			hub.OnMsgSent <- msg
 		case msg := <-hub.recvMessage:
-			go hub.emitRecvMsg(msg)
+			hub.OnMsgRecv <- msg
 		}
 	}
 }

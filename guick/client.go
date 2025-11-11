@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -42,16 +43,9 @@ func (c *Client) Close() error {
 	)
 }
 
-// worker function that endlessly read messages from sebsocket connection.
-//
-// takes doneOk channel to signal that connection was closed normally.
-//
-// takes doneErr channel to signal that connection was closed unexpectedly.
-func (c *Client) readMessages(
-	doneOk chan<- *Client,
-	doneErr chan<- *Client,
-	hubRecv chan<- *Msg,
-) {
+// TODO add work flag mb
+// continiously reads client messages until error occurs or connection is closed
+func (c *Client) readMessages(hubRecv chan<- *Msg) error {
 	// TODO implement later
 	// peer.conn.SetReadLimit(maxMessageSize)
 	// // set pong deadline for first message,
@@ -65,12 +59,10 @@ func (c *Client) readMessages(
 		_, txt, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				doneOk <- c
-				return
+				return nil
 			}
 			slog.Error("[read] connection unexpected close", "error", err)
-			doneErr <- c
-			return
+			return errors.New("unexpected client connection close")
 		}
 		hubRecv <- NewMsg(
 			string(txt),

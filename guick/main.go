@@ -52,7 +52,7 @@ type wsServeHandler struct {
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Error("[serve] upgrade", "error", err)
+		slog.Error("ws upgrade error", "error", err)
 		return
 	}
 
@@ -60,19 +60,19 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// firstly we wait for peer id from the client
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		slog.Error("[serve] read peer id", "error", err)
+		slog.Error("peer UUID read error", "error", err)
 		return
 	}
 	peerId, err := uuid.ParseBytes(msg)
 	if err != nil {
-		slog.Error("[serve] UUID parse", "error", err)
+		slog.Error("UUID parse error", "error", err)
 		return
 	}
 
-	slog.Info("[serve] incoming connection", "peer", string(msg))
+	slog.Info("incoming peer connection", "peer", string(msg))
 
 	if peerId == wsh.peerId {
-		slog.Error("[serve] tried to connect to self, closing connection...")
+		slog.Error("tried to connect to self, closing connection...")
 		conn.Close()
 		return
 	}
@@ -80,7 +80,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// then we respond with our peer id
 	err = conn.WriteMessage(websocket.TextMessage, []byte(wsh.peerId.String()))
 	if err != nil {
-		slog.Error("[serve] send peer id", "error", err)
+		slog.Error("peer UUID send error", "error", err)
 		return
 	}
 
@@ -93,35 +93,35 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 // connect to peers. returns peer as client struct
 func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
-	slog.Debug("[connect] peer connect", "addr", addr)
+	slog.Debug("connecting to peer", "addr", addr)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
-		slog.Error("[connect] peer connect", "error", err)
+		slog.Error("error during connection to peer", "error", err)
 		return nil, err
 	}
 
-	slog.Debug("[connect] sending our peer id")
+	slog.Debug("sending our peer UUID")
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
-		slog.Error("[connect] peer id send", "error", err)
+		slog.Error("error sending peer UUID", "error", err)
 		return nil, err
 	}
 
-	slog.Debug("[connect] waiting for server peer id...")
+	slog.Debug("waiting for server peer UUID...")
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		slog.Error("[connect] read server peer id", "error", err)
+		slog.Error("server peer UUID read error", "error", err)
 		return nil, err
 	}
 
 	serverPeerId, err := uuid.ParseBytes(msg)
 	if err != nil {
-		slog.Error("[connect] server peer id parse", "error", err, "message", msg)
+		slog.Error("error parsing server peer UUID", "error", err, "message", msg)
 		return nil, err
 	}
 
 	if serverPeerId == ourPeerId {
-		slog.Error("[connect] tried to connect to self, closing...")
+		slog.Error("tried to connect to self, closing...")
 		conn.Close()
 		return nil, errors.New("self connection")
 	}
@@ -154,7 +154,6 @@ func main() {
 		return
 	}
 	serverAddr := fmt.Sprintf("%s:%s", *addr, *port)
-	slog.Info("[main]:", "ourPeerId", ourPeerId)
 
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
@@ -168,12 +167,12 @@ func main() {
 
 	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	slog.Info("[main] running server on", "address", serverAddr)
+	slog.Info("running server", "address", serverAddr)
 	go http.ListenAndServe(serverAddr, nil)
 
 	app := app.New()
 	window := app.NewWindow("Guic")
-	window.Resize(fyne.NewSize(500, 500))
+	window.Resize(fyne.NewSize(800, 600))
 
 	peerEntry := widget.NewEntry()
 	peerEntry.SetPlaceHolder("Peer IP")
@@ -238,8 +237,8 @@ func main() {
 
 	textEntry := widget.NewEntry()
 	textEntry.SetPlaceHolder("Enter a message")
-	sendMessage := func(t string) {
-		if t == "" {
+	sendMessage := func(text string) {
+		if text == "" {
 			return
 		}
 		if curPeerId == uuid.Nil {
@@ -250,7 +249,7 @@ func main() {
 			log.Fatalf("[ERROR] cur selected peer not found in hub: %s", curPeerId)
 		}
 		hub.sendMessage <- NewMsg(
-			t,
+			text,
 			ourPeerId,
 			curPeerId,
 			hub.clients[curPeerId].conn.LocalAddr().String(),
@@ -276,6 +275,7 @@ func main() {
 		nil, textSendEntry, nil, nil, placeholderScroll,
 	)
 	content := container.NewHSplit(connContainer, chatBorder)
+	content.SetOffset(0.3)
 
 	peerList.OnSelected = func(id widget.ListItemID) {
 		peerId := fyneListPeers[id]
