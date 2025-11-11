@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -17,6 +18,10 @@ const (
 
 const (
 	maxMessageSizeBytes = 512
+
+	pongWait   = 60 * time.Second
+	pingPeriod = (pongWait * 9) / 10
+	writeWait  = 10 * time.Second
 )
 
 type Client struct {
@@ -28,14 +33,14 @@ type Client struct {
 	conn *websocket.Conn
 
 	// Type of connection that was created. Either from server side or client side
-	connT ConnType
+	connType ConnType
 }
 
 func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType) *Client {
 	return &Client{
-		PeerId: peerId,
-		conn:   conn,
-		connT:  connT,
+		PeerId:   peerId,
+		conn:     conn,
+		connType: connT,
 	}
 }
 
@@ -49,6 +54,38 @@ func (c *Client) GracefulDisconnect() error {
 // continiously reads client messages until error occurs or connection is closed
 func (c *Client) readMessages(hubRecv chan<- *Msg) error {
 	c.conn.SetReadLimit(maxMessageSizeBytes)
+
+	// for server connection type default ping sender is used.
+	// for client connection - set pong handler and start ping sender goroutine
+	if c.connType == TypeClient {
+		// set read deadline for first message
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.conn.SetPongHandler(func(appData string) error {
+			c.conn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
+		ticker := time.NewTicker(pingPeriod)
+		stopPing := make(chan struct{})
+		defer func() {
+			ticker.Stop()
+			stopPing <- struct{}{}
+			close(stopPing)
+		}()
+		// ping sender
+		go func() {
+			for {
+				select {
+				case <-ticker.C:
+					c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+					if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+						return
+					}
+				case <-stopPing:
+					return
+				}
+			}
+		}()
+	}
 	for {
 		_, txt, err := c.conn.ReadMessage()
 		if err != nil {
