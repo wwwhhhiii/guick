@@ -103,6 +103,17 @@ func (hub *Hub) UnregisterClient(client *Client) {
 	hub.unregister <- client
 }
 
+// shorthand for searching and removing client from hub by UUID.
+// returns error if client with such UUID is not found in hub
+func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
+	client, exist := hub.clients[clientUUID]
+	if !exist {
+		return errors.New("client not registered")
+	}
+	hub.unregister <- client
+	return nil
+}
+
 // adds client record to hub registry
 func (hub *Hub) registerClient(c *Client) error {
 	if _, exist := hub.clients[c.PeerId]; exist {

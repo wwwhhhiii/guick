@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -32,7 +33,7 @@ var upgrader = websocket.Upgrader{}
 var ourPeerId = uuid.New()
 
 // current peer to send messages to
-var curPeerId = uuid.Nil
+var selectedPeerId = uuid.Nil
 
 // current peer scroll to show and append sent/recv messages to
 var curPeerScroll *container.Scroll = nil
@@ -231,8 +232,25 @@ func main() {
 		peerEntry,
 		widget.NewButton("Connect", uiOnConnect),
 	)
+	removePeerBtn := widget.NewButton("Remove", func() {
+		removeClient := func(remove bool) {
+			if !remove {
+				return
+			}
+			if selectedPeerId == uuid.Nil {
+				return
+			}
+			if err := hub.UnregisterClientByUUID(selectedPeerId); err != nil {
+				showModalPopup(err.Error(), window.Canvas())
+			}
+		}
+		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, window).Show()
+	})
+	removePeerBtn.Disable()
 	connContainer := container.NewBorder(
-		connEntry, nil, nil, nil, peerList,
+		connEntry,
+		nil, nil, nil,
+		container.NewBorder(nil, removePeerBtn, nil, nil, peerList),
 	)
 
 	textEntry := widget.NewEntry()
@@ -241,19 +259,19 @@ func main() {
 		if text == "" {
 			return
 		}
-		if curPeerId == uuid.Nil {
+		if selectedPeerId == uuid.Nil {
 			showModalPopup("Select peer", window.Canvas())
 			return
 		}
-		if _, exist := hub.clients[curPeerId]; !exist {
-			log.Fatalf("[ERROR] cur selected peer not found in hub: %s", curPeerId)
+		if _, exist := hub.clients[selectedPeerId]; !exist {
+			log.Fatalf("[ERROR] cur selected peer not found in hub: %s", selectedPeerId)
 		}
 		hub.sendMessage <- NewMsg(
 			text,
 			ourPeerId,
-			curPeerId,
-			hub.clients[curPeerId].conn.LocalAddr().String(),
-			hub.clients[curPeerId].conn.RemoteAddr().String(),
+			selectedPeerId,
+			hub.clients[selectedPeerId].conn.LocalAddr().String(),
+			hub.clients[selectedPeerId].conn.RemoteAddr().String(),
 		)
 		textEntry.SetText("")
 	}
@@ -282,29 +300,32 @@ func main() {
 		if peerId == uuid.Nil {
 			return
 		}
-		curPeerId = peerId
-		if _, exist := peerScrollWindows[curPeerId]; !exist {
-			peerScrollWindows[curPeerId] = container.NewScroll(widget.NewTextGrid())
+		selectedPeerId = peerId
+		if _, exist := peerScrollWindows[selectedPeerId]; !exist {
+			peerScrollWindows[selectedPeerId] = container.NewScroll(widget.NewTextGrid())
 		}
-		curPeerScroll = peerScrollWindows[curPeerId]
+		curPeerScroll = peerScrollWindows[selectedPeerId]
 		chatBorder.Objects[0].(*container.Scroll).Hide()
 		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
-		// because we still want to show it later
+		// because we still want to show it later when client is selected again
 		chatBorder.Objects[0] = curPeerScroll
 		curPeerScroll.Show()
 		textEntry.Enable()
 		textEntryBtn.Enable()
+		removePeerBtn.Enable()
 	}
+	// remove peer widgets from app window, disble control buttons
 	unselectPeer := func(peerId uuid.UUID) {
 		delete(peerScrollWindows, peerId)
 		// replace with placeholder to delete reference for current peer scroll from UI
 		chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
-		unregisteredSelectedPeer := peerId == curPeerId
+		unregisteredSelectedPeer := peerId == selectedPeerId
 		if unregisteredSelectedPeer {
-			curPeerId = uuid.Nil
+			selectedPeerId = uuid.Nil
 			fyne.Do(func() {
 				textEntry.Disable()
 				textEntryBtn.Disable()
+				removePeerBtn.Disable()
 			})
 		}
 	}
