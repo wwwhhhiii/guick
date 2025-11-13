@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/cipher"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"time"
@@ -34,13 +36,16 @@ type Client struct {
 
 	// Type of connection that was created. Either from server side or client side
 	connType ConnType
+
+	aesgcm cipher.AEAD
 }
 
-func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType) *Client {
+func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Client {
 	return &Client{
 		PeerId:   peerId,
 		conn:     conn,
 		connType: connT,
+		aesgcm:   aesgcm,
 	}
 }
 
@@ -76,10 +81,12 @@ func (c *Client) readMessages(hubRecv chan<- *Msg) error {
 			for {
 				select {
 				case <-ticker.C:
-					c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-					if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					err := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
+					if err != nil {
+						slog.Error("write ping message", "error", err)
 						return
 					}
+					slog.Info("ping", "who", c.conn.RemoteAddr())
 				case <-stopPing:
 					return
 				}
@@ -87,7 +94,8 @@ func (c *Client) readMessages(hubRecv chan<- *Msg) error {
 		}()
 	}
 	for {
-		_, txt, err := c.conn.ReadMessage()
+		messageType, data, err := c.conn.ReadMessage()
+		slog.Info("recv message", "type", messageType)
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				return nil
@@ -95,8 +103,24 @@ func (c *Client) readMessages(hubRecv chan<- *Msg) error {
 			slog.Error("[read] connection unexpected close", "error", err)
 			return errors.New("unexpected client connection close")
 		}
+		if messageType != websocket.TextMessage {
+			slog.Error("unexpected non-text message", "message", data)
+			continue
+		}
+		// decrypt message
+		message := &EncryptedMessage{}
+		if err := json.Unmarshal(data, message); err != nil {
+			slog.Error("message unmarshal", "error", err)
+			continue
+		}
+		slog.Warn("recv message", "ciphertext", message.Ciphertext, "nonce", message.Nonce)
+		plaintext, err := DecryptMessage(message.Ciphertext, message.Nonce, c.aesgcm)
+		if err != nil {
+			slog.Error("message decrypt", "error", err)
+			continue
+		}
 		hubRecv <- NewMsg(
-			string(txt),
+			plaintext,
 			c.PeerId,
 			uuid.Nil, // TODO here should be our uuid
 			c.conn.RemoteAddr().String(),

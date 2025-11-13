@@ -1,9 +1,14 @@
 package main
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -14,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/hkdf"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -45,8 +51,9 @@ var fyneListPeers = []uuid.UUID{}
 var peerScrollWindows = make(map[uuid.UUID]*container.Scroll)
 
 type wsServeHandler struct {
-	hub    *Hub
-	peerId uuid.UUID
+	hub        *Hub
+	privateKey *ecdh.PrivateKey
+	peerId     uuid.UUID
 }
 
 // serve incoming peers connections. register connected peers in a hub
@@ -57,8 +64,58 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// if we recv client connection,
-	// firstly we wait for peer id from the client
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		slog.Error("peer public key read", "error", err)
+		return
+	}
+	peerParsedKey, err := x509.ParsePKIXPublicKey(data)
+	if err != nil {
+		slog.Error("peer public key parse", "error", err)
+		// TODO: close connection
+		return
+	}
+	peerPublicKey, ok := peerParsedKey.(*ecdh.PublicKey)
+	if !ok {
+		slog.Error("peer public key type assertion", "error", err)
+		// TODO: close connection
+		return
+	}
+
+	publicKeyData, err := x509.MarshalPKIXPublicKey(wsh.privateKey.PublicKey())
+	if err != nil {
+		slog.Error("public key marshal", "error", err)
+		// TODO: close connection
+		return
+	}
+	if err = conn.WriteMessage(websocket.TextMessage, publicKeyData); err != nil {
+		slog.Error("public key send", "error", err)
+	}
+	sharedSecret, err := wsh.privateKey.ECDH(peerPublicKey)
+	if err != nil {
+		slog.Error("shared secret derivation", "error", err)
+		return
+	}
+	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
+	encryptionKey := make([]byte, 16) // AES-128
+	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
+		// TODO: close connection
+		return
+	}
+	slog.Info(
+		"[S E R V E R]",
+		"sharedSecret", sharedSecret,
+		"encryptionKey", encryptionKey,
+		"encryptionKeySize", len(encryptionKey),
+	)
+	aesgcm, err := AesGCM(encryptionKey)
+	if err != nil {
+		slog.Error("aesgcm generation", "error", err)
+		// TODO: close connection
+		return
+	}
+
+	// now exchange user IDs
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		slog.Error("peer UUID read error", "error", err)
@@ -88,11 +145,15 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// TODO here we assuming that we are ok after sending our peer id,
 	// but we may be not ok if the client did not recv our peer id, (or some other err occured)
 	// so we need some response that he registered us?
-	wsh.hub.RegisterClient(NewClient(peerId, conn, TypeServer))
+	wsh.hub.RegisterClient(NewClient(peerId, conn, TypeServer, aesgcm))
 }
 
 // connect to peers. returns peer as client struct
-func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
+func connect(
+	addr string,
+	ourPeerId uuid.UUID,
+	privateKey *ecdh.PrivateKey,
+) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", addr)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
@@ -101,14 +162,59 @@ func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 		return nil, err
 	}
 
-	slog.Debug("sending our peer UUID")
+	// ecdh key exchange
+	publicKeyData, err := x509.MarshalPKIXPublicKey(privateKey.PublicKey())
+	if err != nil {
+		slog.Error("public key marshal", "error", err)
+		return nil, err
+	}
+	if err = conn.WriteMessage(websocket.TextMessage, publicKeyData); err != nil {
+		slog.Error("public key send", "error", err)
+		return nil, err
+	}
+	_, peerPublicKeyData, err := conn.ReadMessage()
+	if err != nil {
+		slog.Error("peer public key receive", "error", err)
+		return nil, err
+	}
+	peerParsedKey, err := x509.ParsePKIXPublicKey(peerPublicKeyData)
+	if err != nil {
+		slog.Error("peer public key parse", "error", err)
+		return nil, err
+	}
+	peerPublicKey, ok := peerParsedKey.(*ecdh.PublicKey)
+	if !ok {
+		slog.Error("peer public key type assertion error")
+		return nil, errors.New("peer public key type assertion error")
+	}
+	sharedSecret, err := privateKey.ECDH(peerPublicKey)
+	if err != nil {
+		slog.Error("shared secret derivation", "error", err)
+		return nil, err
+	}
+	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
+	encryptionKey := make([]byte, 16) // AES-128
+	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
+		return nil, err
+	}
+	slog.Info(
+		"[C L I E N T]",
+		"sharedSecret", sharedSecret,
+		"encryptionKey", encryptionKey,
+		"encryptionKeySize", len(encryptionKey),
+	)
+	aesgcm, err := AesGCM(encryptionKey)
+	if err != nil {
+		slog.Error("aesgcm generation", "error", err)
+		return nil, err
+	}
+
 	err = conn.WriteMessage(websocket.TextMessage, []byte(ourPeerId.String()))
 	if err != nil {
 		slog.Error("error sending peer UUID", "error", err)
 		return nil, err
 	}
 
-	slog.Debug("waiting for server peer UUID...")
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		slog.Error("server peer UUID read error", "error", err)
@@ -127,7 +233,7 @@ func connect(addr string, ourPeerId uuid.UUID) (*Client, error) {
 		return nil, errors.New("self connection")
 	}
 
-	return NewClient(serverPeerId, conn, TypeClient), nil
+	return NewClient(serverPeerId, conn, TypeClient, aesgcm), nil
 }
 
 func showModalPopup(txt string, onCanvas fyne.Canvas) {
@@ -166,7 +272,17 @@ func main() {
 	signal.Notify(interrupt, os.Interrupt)
 	go hub.Run(interrupt)
 
-	wsHandler := &wsServeHandler{hub: hub, peerId: ourPeerId}
+	// generate ecdh key-pair
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+
+	wsHandler := &wsServeHandler{
+		hub:        hub,
+		peerId:     ourPeerId,
+		privateKey: privateKey,
+	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
 	slog.Info("running server", "address", serverAddr)
 	go http.ListenAndServe(serverAddr, nil)
@@ -215,7 +331,7 @@ func main() {
 			return
 		}
 		// TODO also need to check here if already connected
-		client, err := connect(peerEntry.Text, ourPeerId)
+		client, err := connect(peerEntry.Text, ourPeerId, privateKey)
 		if err != nil {
 			showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
 			return

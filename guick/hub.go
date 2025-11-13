@@ -1,7 +1,12 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -20,7 +25,7 @@ type Msg struct {
 	ToPeerId     uuid.UUID
 	FromPeerAddr string
 	ToPeerAddr   string
-	Txt          string
+	Txt          string `json:"text"`
 }
 
 func NewMsg(
@@ -37,6 +42,43 @@ func NewMsg(
 		FromPeerAddr: fromPeerAddr,
 		ToPeerAddr:   toPeerAddr,
 	}
+}
+
+type EncryptedMessage struct {
+	Ciphertext []byte `json:"ciphertext"`
+	Nonce      []byte `json:"nonce"`
+}
+
+func NewEncryptedMessage(ciphertext []byte, nonce []byte) *EncryptedMessage {
+	return &EncryptedMessage{
+		Ciphertext: ciphertext,
+		Nonce:      nonce,
+	}
+}
+
+func AesGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func EncryptMessage(plaintext string, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
+	nonce := make([]byte, aesgcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ciphertext := aesgcm.Seal(nil, nonce, []byte(plaintext), nil)
+	return NewEncryptedMessage(ciphertext, nonce), nil
+}
+
+func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) (string, error) {
+	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
 }
 
 type Hub struct {
@@ -170,15 +212,22 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if !exist {
 				log.Fatal("unknown peer", msg.ToPeerId)
 			}
-			// TODO add write deadline
-			w, err := client.conn.NextWriter(websocket.TextMessage)
+			encryptedMessage, err := EncryptMessage(msg.Txt, client.aesgcm)
 			if err != nil {
-				log.Fatalf("writer get err: %s", err)
+				slog.Error("message encrypt", "error", err)
+				continue
 			}
-			w.Write([]byte(msg.Txt))
-			if err := w.Close(); err != nil {
-				log.Fatalf("writer close err: %s", err)
+			data, err := json.Marshal(encryptedMessage)
+			if err != nil {
+				slog.Error("message marshal", "error", err)
+				continue
 			}
+			// TODO add write deadline
+			if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				slog.Error("message write", "error", err)
+				continue
+			}
+			slog.Info("sent message", "ciphertext", encryptedMessage.Ciphertext, "nonce", encryptedMessage.Nonce)
 			hub.OnMsgSent <- msg
 		case msg := <-hub.recvMessage:
 			hub.OnMsgRecv <- msg
