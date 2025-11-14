@@ -49,82 +49,97 @@ func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm ci
 	}
 }
 
-// gracefully closes client websocket connection
-func (c *Client) GracefulDisconnect() error {
-	return c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
+// gracefully closes client connection
+func (client *Client) GracefulDisconnect() error {
+	return client.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
 		websocket.CloseNormalClosure, ""),
 	)
 }
 
+// encrypts and writes message to underlying client connection
+func (client *Client) SendMessage(text string) error {
+	encryptedMessage, err := EncryptMessage(text, client.aesgcm)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(encryptedMessage)
+	if err != nil {
+		return err
+	}
+	if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pingConnection(connection *websocket.Conn, stop <-chan struct{}) {
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			err := connection.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
+			if err != nil {
+				slog.Error("write ping message", "error", err)
+				return
+			}
+			slog.Info("ping", "who", connection.RemoteAddr())
+		case <-stop:
+			return
+		}
+	}
+}
+
 // continiously reads client messages until error occurs or connection is closed
-func (c *Client) readMessages(hubRecv chan<- *Msg) error {
-	c.conn.SetReadLimit(maxMessageSizeBytes)
+func (client *Client) readMessages(hubRecv chan<- *Message) error {
+	client.conn.SetReadLimit(maxMessageSizeBytes)
 
 	// for server connection type default ping sender is used.
 	// for client connection - set pong handler and start ping sender goroutine
-	if c.connType == TypeClient {
+	if client.connType == TypeClient {
 		// set read deadline for first message
-		c.conn.SetReadDeadline(time.Now().Add(pongWait))
-		c.conn.SetPongHandler(func(appData string) error {
-			c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		client.conn.SetReadDeadline(time.Now().Add(pongWait))
+		client.conn.SetPongHandler(func(appData string) error {
+			client.conn.SetReadDeadline(time.Now().Add(pongWait))
 			return nil
 		})
-		ticker := time.NewTicker(pingPeriod)
 		stopPing := make(chan struct{})
 		defer func() {
-			ticker.Stop()
 			stopPing <- struct{}{}
 			close(stopPing)
 		}()
-		// ping sender
-		go func() {
-			for {
-				select {
-				case <-ticker.C:
-					err := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
-					if err != nil {
-						slog.Error("write ping message", "error", err)
-						return
-					}
-					slog.Info("ping", "who", c.conn.RemoteAddr())
-				case <-stopPing:
-					return
-				}
-			}
-		}()
+		go pingConnection(client.conn, stopPing)
 	}
 	for {
-		messageType, data, err := c.conn.ReadMessage()
-		slog.Info("recv message", "type", messageType)
+		messageType, data, err := client.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				slog.Info("connection closed by peer", "peerId", client.PeerId)
 				return nil
 			}
-			slog.Error("[read] connection unexpected close", "error", err)
-			return errors.New("unexpected client connection close")
+			slog.Error("peer connection read", "peerId", client.PeerId, "error", err)
+			return errors.New("error reading peer message")
 		}
 		if messageType != websocket.TextMessage {
-			slog.Error("unexpected non-text message", "message", data)
+			slog.Error(
+				"received unexpected non-text message",
+				"peerId", client.PeerId,
+				"messageType", messageType,
+				"message", data,
+			)
 			continue
 		}
-		// decrypt message
-		message := &EncryptedMessage{}
-		if err := json.Unmarshal(data, message); err != nil {
-			slog.Error("message unmarshal", "error", err)
-			continue
-		}
-		slog.Warn("recv message", "ciphertext", message.Ciphertext, "nonce", message.Nonce)
-		plaintext, err := DecryptMessage(message.Ciphertext, message.Nonce, c.aesgcm)
+		plaintext, err := DecryptMessageData(data, client.aesgcm)
 		if err != nil {
-			slog.Error("message decrypt", "error", err)
+			slog.Error("message data decrypt", "error", err)
 			continue
 		}
 		hubRecv <- NewMsg(
 			plaintext,
-			c.PeerId,
-			uuid.Nil, // TODO here should be our uuid
-			c.conn.RemoteAddr().String(),
-			c.conn.LocalAddr().String(),
+			client.PeerId,
+			ourPeerId,
+			client.conn.RemoteAddr().String(),
+			client.conn.LocalAddr().String(),
 		)
 	}
 }

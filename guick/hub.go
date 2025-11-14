@@ -12,15 +12,9 @@ import (
 	"os"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 )
 
-// TODO s:
-//
-// - buffered channel for reading and writing messages
-// - impl ping-pong and read timeout
-
-type Msg struct {
+type Message struct {
 	FromPeerId   uuid.UUID
 	ToPeerId     uuid.UUID
 	FromPeerAddr string
@@ -34,8 +28,8 @@ func NewMsg(
 	toPeerId uuid.UUID,
 	fromPeerAddr string,
 	toPeerAddr string,
-) *Msg {
-	return &Msg{
+) *Message {
+	return &Message{
 		Txt:          txt,
 		FromPeerId:   fromPeerId,
 		ToPeerId:     toPeerId,
@@ -54,6 +48,15 @@ func NewEncryptedMessage(ciphertext []byte, nonce []byte) *EncryptedMessage {
 		Ciphertext: ciphertext,
 		Nonce:      nonce,
 	}
+}
+
+// decrypts structured peer message data into plaintext
+func DecryptMessageData(data []byte, aesgcm cipher.AEAD) (string, error) {
+	message := &EncryptedMessage{}
+	if err := json.Unmarshal(data, message); err != nil {
+		return "", err
+	}
+	return DecryptMessage(message.Ciphertext, message.Nonce, aesgcm)
 }
 
 func AesGCM(key []byte) (cipher.AEAD, error) {
@@ -92,10 +95,10 @@ type Hub struct {
 	unregister chan *Client
 
 	// coming from client
-	sendMessage chan *Msg
+	sendMessage chan *Message
 
 	// coming from goroutine listening to peer messages
-	recvMessage chan *Msg
+	recvMessage chan *Message
 
 	// Clients successfuly registered in hub are sent here.
 	// Use this to receive registred clients events
@@ -107,25 +110,25 @@ type Hub struct {
 
 	// Sends messages that were received from peers.
 	// Use this to receive messages from peers
-	OnMsgRecv chan<- *Msg
+	OnMsgRecv chan<- *Message
 
 	// Sends messages that were sent to peer.
 	// Use this to receive messages that you sent
-	OnMsgSent chan<- *Msg
+	OnMsgSent chan<- *Message
 }
 
 func newHub(
 	onClientReg chan<- *Client,
 	onClientUnreg chan<- *Client,
-	onMsgRecv chan<- *Msg,
-	onMsgSent chan<- *Msg,
+	onMsgRecv chan<- *Message,
+	onMsgSent chan<- *Message,
 ) *Hub {
 	return &Hub{
 		clients:       make(map[uuid.UUID]*Client, 100),
 		register:      make(chan *Client, 100),
 		unregister:    make(chan *Client, 100),
-		sendMessage:   make(chan *Msg, 100),
-		recvMessage:   make(chan *Msg, 100),
+		sendMessage:   make(chan *Message, 100),
+		recvMessage:   make(chan *Message, 100),
 		OnClientReg:   onClientReg,
 		OnClientUnreg: onClientUnreg,
 		OnMsgRecv:     onMsgRecv,
@@ -177,6 +180,12 @@ func (hub *Hub) disconnectClient(client *Client) error {
 	return nil
 }
 
+func (hub *Hub) closeClientConnection(client *Client) {
+	client.conn.Close()
+	delete(hub.clients, client.PeerId)
+	hub.OnClientUnreg <- client
+}
+
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	for {
 		select {
@@ -195,10 +204,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				if err != nil {
 					// TODO start some reconnect goroutine?
 				}
+				// assume here that connection is closed
 				// connection is useless by now, so just disconnect and cleanup client
-				if err := hub.disconnectClient(client); err != nil {
-					slog.Error(err.Error(), "location", "hub")
-				}
+				hub.closeClientConnection(client)
+				slog.Info("connection with peer closed", "peerId", client.PeerId)
 			}()
 			hub.OnClientReg <- client
 		case client := <-hub.unregister:
@@ -212,22 +221,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if !exist {
 				log.Fatal("unknown peer", msg.ToPeerId)
 			}
-			encryptedMessage, err := EncryptMessage(msg.Txt, client.aesgcm)
-			if err != nil {
-				slog.Error("message encrypt", "error", err)
+			if err := client.SendMessage(msg.Txt); err != nil {
+				slog.Error("client send message", "error", err)
 				continue
 			}
-			data, err := json.Marshal(encryptedMessage)
-			if err != nil {
-				slog.Error("message marshal", "error", err)
-				continue
-			}
-			// TODO add write deadline
-			if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				slog.Error("message write", "error", err)
-				continue
-			}
-			slog.Info("sent message", "ciphertext", encryptedMessage.Ciphertext, "nonce", encryptedMessage.Nonce)
 			hub.OnMsgSent <- msg
 		case msg := <-hub.recvMessage:
 			hub.OnMsgRecv <- msg

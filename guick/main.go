@@ -102,12 +102,6 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		// TODO: close connection
 		return
 	}
-	slog.Info(
-		"[S E R V E R]",
-		"sharedSecret", sharedSecret,
-		"encryptionKey", encryptionKey,
-		"encryptionKeySize", len(encryptionKey),
-	)
 	aesgcm, err := AesGCM(encryptionKey)
 	if err != nil {
 		slog.Error("aesgcm generation", "error", err)
@@ -197,12 +191,6 @@ func connect(
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
-	slog.Info(
-		"[C L I E N T]",
-		"sharedSecret", sharedSecret,
-		"encryptionKey", encryptionKey,
-		"encryptionKeySize", len(encryptionKey),
-	)
 	aesgcm, err := AesGCM(encryptionKey)
 	if err != nil {
 		slog.Error("aesgcm generation", "error", err)
@@ -264,8 +252,8 @@ func main() {
 
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
-	onRecvMessage := make(chan *Msg)
-	onSentMessage := make(chan *Msg)
+	onRecvMessage := make(chan *Message)
+	onSentMessage := make(chan *Message)
 	hub := newHub(onClientRegistered, onClientUnregistered, onRecvMessage, onSentMessage)
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
