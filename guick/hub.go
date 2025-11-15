@@ -10,6 +10,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -85,6 +86,8 @@ func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) (string
 }
 
 type Hub struct {
+	mu sync.RWMutex
+
 	// mapping of peer id to its client representation
 	clients map[uuid.UUID]*Client
 
@@ -151,6 +154,8 @@ func (hub *Hub) UnregisterClient(client *Client) {
 // shorthand for searching and removing client from hub by UUID.
 // returns error if client with such UUID is not found in hub
 func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
 	client, exist := hub.clients[clientUUID]
 	if !exist {
 		return errors.New("client not registered")
@@ -161,6 +166,8 @@ func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
 
 // adds client record to hub registry
 func (hub *Hub) registerClient(c *Client) error {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
 	if _, exist := hub.clients[c.PeerId]; exist {
 		return errors.New("peer already registered")
 	}
@@ -172,6 +179,8 @@ func (hub *Hub) registerClient(c *Client) error {
 // deletes client record from a hub.
 // emits client unregistered event.
 func (hub *Hub) disconnectClient(client *Client) error {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
 	if err := client.GracefulDisconnect(); err != nil {
 		client.conn.Close()
 	}
@@ -181,6 +190,8 @@ func (hub *Hub) disconnectClient(client *Client) error {
 }
 
 func (hub *Hub) closeClientConnection(client *Client) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
 	client.conn.Close()
 	delete(hub.clients, client.PeerId)
 	hub.OnClientUnreg <- client
@@ -202,10 +213,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			go func() {
 				err := client.readMessages(hub.recvMessage)
 				if err != nil {
+					// connection was not closed normally by peer
 					// TODO start some reconnect goroutine?
 				}
-				// assume here that connection is closed
-				// connection is useless by now, so just disconnect and cleanup client
+				// read stops when peer closes the connection
 				hub.closeClientConnection(client)
 				slog.Info("connection with peer closed", "peerId", client.PeerId)
 			}()
@@ -233,6 +244,8 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 }
 
 func (hub *Hub) Shutdown() {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
 	delKeys := make([]uuid.UUID, len(hub.clients))
 	for _, client := range hub.clients {
 		client.GracefulDisconnect()

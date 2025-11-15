@@ -90,7 +90,8 @@ func pingConnection(connection *websocket.Conn, stop <-chan struct{}) {
 	}
 }
 
-// continiously reads client messages until error occurs or connection is closed
+// continiously reads client messages until error occurs
+// or connection is closed by peer
 func (client *Client) readMessages(hubRecv chan<- *Message) error {
 	client.conn.SetReadLimit(maxMessageSizeBytes)
 
