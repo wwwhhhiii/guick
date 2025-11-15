@@ -211,12 +211,13 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 			slog.Info("client registered", "client", client.PeerId, "location", "hub")
 			go func() {
-				err := client.readMessages(hub.recvMessage)
-				if err != nil {
-					// connection was not closed normally by peer
-					// TODO start some reconnect goroutine?
+				pingStop := ConfigureClientConnection(client.conn)
+				defer close(pingStop)
+				for msg := range client.ReadMessagesGen() {
+					hub.recvMessage <- msg
+					// reading stops when peer connection is closed or broken
 				}
-				// read stops when peer closes the connection
+				pingStop <- struct{}{}
 				hub.closeClientConnection(client)
 				slog.Info("connection with peer closed", "peerId", client.PeerId)
 			}()

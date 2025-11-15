@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/cipher"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -72,8 +71,8 @@ func (client *Client) SendMessage(text string) error {
 	return nil
 }
 
-func pingConnection(connection *websocket.Conn, stop <-chan struct{}) {
-	ticker := time.NewTicker(pingPeriod)
+func StartConnectionPing(connection *websocket.Conn, pingInterval time.Duration, stop <-chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -90,57 +89,54 @@ func pingConnection(connection *websocket.Conn, stop <-chan struct{}) {
 	}
 }
 
-// continiously reads client messages until error occurs
-// or connection is closed by peer
-func (client *Client) readMessages(hubRecv chan<- *Message) error {
-	client.conn.SetReadLimit(maxMessageSizeBytes)
+func ConfigureClientConnection(connection *websocket.Conn) chan<- struct{} {
+	connection.SetReadLimit(maxMessageSizeBytes)
+	connection.SetReadDeadline(time.Now().Add(pongWait))
+	connection.SetPongHandler(func(appData string) error {
+		connection.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+	pingStop := make(chan struct{})
+	go StartConnectionPing(connection, pingPeriod, pingStop)
+	return pingStop
+}
 
-	// for server connection type default ping sender is used.
-	// for client connection - set pong handler and start ping sender goroutine
-	if client.connType == TypeClient {
-		// set read deadline for first message
-		client.conn.SetReadDeadline(time.Now().Add(pongWait))
-		client.conn.SetPongHandler(func(appData string) error {
-			client.conn.SetReadDeadline(time.Now().Add(pongWait))
-			return nil
-		})
-		stopPing := make(chan struct{})
-		defer func() {
-			stopPing <- struct{}{}
-			close(stopPing)
-		}()
-		go pingConnection(client.conn, stopPing)
-	}
-	for {
-		messageType, data, err := client.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				slog.Info("connection closed by peer", "peerId", client.PeerId)
-				return nil
+func (client *Client) ReadMessagesGen() <-chan *Message {
+	out := make(chan *Message)
+	go func() {
+		defer close(out)
+		for {
+			messageType, data, err := client.conn.ReadMessage()
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					slog.Info("connection closed by peer", "peerId", client.PeerId)
+					break
+				}
+				slog.Error("peer connection read", "peerId", client.PeerId, "error", err)
+				break
 			}
-			slog.Error("peer connection read", "peerId", client.PeerId, "error", err)
-			return errors.New("error reading peer message")
-		}
-		if messageType != websocket.TextMessage {
-			slog.Error(
-				"received unexpected non-text message",
-				"peerId", client.PeerId,
-				"messageType", messageType,
-				"message", data,
+			if messageType != websocket.TextMessage {
+				slog.Error(
+					"received unexpected non-text message",
+					"peerId", client.PeerId,
+					"messageType", messageType,
+					"message", data,
+				)
+				continue
+			}
+			plaintext, err := DecryptMessageData(data, client.aesgcm)
+			if err != nil {
+				slog.Error("message data decrypt", "error", err)
+				continue
+			}
+			out <- NewMsg(
+				plaintext,
+				client.PeerId,
+				ourPeerId,
+				client.conn.RemoteAddr().String(),
+				client.conn.LocalAddr().String(),
 			)
-			continue
 		}
-		plaintext, err := DecryptMessageData(data, client.aesgcm)
-		if err != nil {
-			slog.Error("message data decrypt", "error", err)
-			continue
-		}
-		hubRecv <- NewMsg(
-			plaintext,
-			client.PeerId,
-			ourPeerId,
-			client.conn.RemoteAddr().String(),
-			client.conn.LocalAddr().String(),
-		)
-	}
+	}()
+	return out
 }
