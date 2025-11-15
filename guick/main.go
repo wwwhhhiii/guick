@@ -54,10 +54,21 @@ type wsServeHandler struct {
 	hub        *Hub
 	privateKey *ecdh.PrivateKey
 	peerId     uuid.UUID
+
+	// incoming connection confirmation by user
+	connectAccept func(r *http.Request) (<-chan bool, func())
 }
 
 // serve incoming peers connections. register connected peers in a hub
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
+	// accepted incoming connection in UI
+	accepted, closer := wsh.connectAccept(r)
+	defer closer()
+	if !<-accepted {
+		http.Error(w, "Connection Rejected", http.StatusForbidden)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("ws upgrade error", "error", err)
@@ -150,9 +161,12 @@ func connect(
 ) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", addr)
-	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
 		slog.Error("error during connection to peer", "error", err)
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, errors.New("peer rejected connection")
+		}
 		return nil, err
 	}
 
@@ -266,18 +280,30 @@ func main() {
 		panic(err)
 	}
 
+	app := app.New()
+	window := app.NewWindow("Guic")
+	window.Resize(fyne.NewSize(800, 600))
+
+	// UI confirmation for incoming connections
+	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
+		acceptChan := make(chan bool)
+		closer := func() { close(acceptChan) }
+		onAccept := func(accepted bool) { acceptChan <- accepted }
+		dialog.NewConfirm(
+			"Confirm", fmt.Sprintf("Accept client %s connection?", r.RemoteAddr),
+			onAccept, window).Show()
+		return acceptChan, closer
+	}
+
 	wsHandler := &wsServeHandler{
-		hub:        hub,
-		peerId:     ourPeerId,
-		privateKey: privateKey,
+		hub:           hub,
+		peerId:        ourPeerId,
+		privateKey:    privateKey,
+		connectAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
 	slog.Info("running server", "address", serverAddr)
 	go http.ListenAndServe(serverAddr, nil)
-
-	app := app.New()
-	window := app.NewWindow("Guic")
-	window.Resize(fyne.NewSize(800, 600))
 
 	peerEntry := widget.NewEntry()
 	peerEntry.SetPlaceHolder("Peer IP")
