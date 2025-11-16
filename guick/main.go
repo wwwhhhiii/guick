@@ -62,8 +62,8 @@ func showModalPopup(txt string, onCanvas fyne.Canvas) {
 func createPeerRequestElement(text string, accepted chan<- bool) *fyne.Container {
 	return container.NewHBox(
 		widget.NewLabel(text),
-		widget.NewButton("accept", func() { accepted <- true }),
-		widget.NewButton("decline", func() { accepted <- false }),
+		widget.NewButton("✔", func() { accepted <- true }),
+		widget.NewButton("✖", func() { accepted <- false }),
 	)
 }
 
