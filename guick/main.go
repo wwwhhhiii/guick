@@ -45,6 +45,8 @@ var fyneListPeers = []uuid.UUID{}
 // peer chat containers to select from when selecting current peer in UI
 var peerScrollWindows = make(map[uuid.UUID]*container.Scroll)
 
+var sentConnectRequests = make(map[string]struct{})
+
 func showModalPopup(txt string, onCanvas fyne.Canvas) {
 	// TODO maybe make this a temporary modal that is overwritten
 	var modal *widget.PopUp
@@ -173,20 +175,28 @@ func main() {
 			showModalPopup(errTxt, mainWindow.Canvas())
 			return
 		}
+		peerAddress := peerEntry.Text
+		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
+			showModalPopup("request already sent", mainWindow.Canvas())
+			return
+		}
 		// TODO also need to check here if already connected
 		go func() {
-			client, err := ConnectToPeer(peerEntry.Text, ourPeerId, privateKey)
+			sentConnectRequests[peerAddress] = struct{}{}
+			defer func() { delete(sentConnectRequests, peerAddress) }()
+			client, err := ConnectToPeer(peerAddress, ourPeerId, privateKey)
 			if err != nil {
 				showModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas())
 				return
 			}
 			hub.RegisterClient(client)
-			fyne.Do(func() { peerEntry.SetText("") })
 			showModalPopup(
 				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
 				mainWindow.Canvas(),
 			)
 		}()
+		showModalPopup("Request sent", mainWindow.Canvas())
+		peerEntry.SetText("")
 	}
 	peerEntry.OnSubmitted = func(s string) { uiOnConnect() }
 	connEntry := container.NewVBox(
