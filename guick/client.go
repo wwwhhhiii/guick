@@ -65,6 +65,7 @@ func (client *Client) SendMessage(text string) error {
 	if err != nil {
 		return err
 	}
+	// TODO: change message type to websocket.BinaryMessage
 	if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return err
 	}

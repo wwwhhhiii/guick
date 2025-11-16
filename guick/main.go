@@ -56,16 +56,17 @@ type wsServeHandler struct {
 	peerId     uuid.UUID
 
 	// incoming connection confirmation by user
-	connectAccept func(r *http.Request) (<-chan bool, func())
+	requestAccept func(r *http.Request) (<-chan bool, func())
 }
 
 // serve incoming peers connections. register connected peers in a hub
 func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	// accepted incoming connection in UI
-	accepted, closer := wsh.connectAccept(r)
+	accepted, closer := wsh.requestAccept(r)
 	defer closer()
 	if !<-accepted {
-		http.Error(w, "Connection Rejected", http.StatusForbidden)
+		// in fact any code other than 101 will suffice
+		http.Error(w, "Connection refused", http.StatusForbidden)
 		return
 	}
 
@@ -75,6 +76,13 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// close connection on error
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		slog.Error("peer public key read", "error", err)
@@ -83,20 +91,17 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	peerParsedKey, err := x509.ParsePKIXPublicKey(data)
 	if err != nil {
 		slog.Error("peer public key parse", "error", err)
-		// TODO: close connection
 		return
 	}
 	peerPublicKey, ok := peerParsedKey.(*ecdh.PublicKey)
 	if !ok {
 		slog.Error("peer public key type assertion", "error", err)
-		// TODO: close connection
 		return
 	}
 
 	publicKeyData, err := x509.MarshalPKIXPublicKey(wsh.privateKey.PublicKey())
 	if err != nil {
 		slog.Error("public key marshal", "error", err)
-		// TODO: close connection
 		return
 	}
 	if err = conn.WriteMessage(websocket.TextMessage, publicKeyData); err != nil {
@@ -110,13 +115,11 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
 	encryptionKey := make([]byte, 16) // AES-128
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
-		// TODO: close connection
 		return
 	}
 	aesgcm, err := AesGCM(encryptionKey)
 	if err != nil {
 		slog.Error("aesgcm generation", "error", err)
-		// TODO: close connection
 		return
 	}
 
@@ -136,7 +139,6 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 
 	if peerId == wsh.peerId {
 		slog.Error("tried to connect to self, closing connection...")
-		conn.Close()
 		return
 	}
 
@@ -153,21 +155,21 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 	wsh.hub.RegisterClient(NewClient(peerId, conn, TypeServer, aesgcm))
 }
 
-// connect to peers. returns peer as client struct
-func connect(
+// tries to connect to a peer. returns peer as client struct
+func connectToPeer(
 	addr string,
 	ourPeerId uuid.UUID,
 	privateKey *ecdh.PrivateKey,
 ) (*Client, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", addr)
-	conn, resp, err := websocket.DefaultDialer.Dial(url.String(), nil)
+	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
-		slog.Error("error during connection to peer", "error", err)
-		if resp.StatusCode == http.StatusForbidden {
-			return nil, errors.New("peer rejected connection")
+		if errors.Is(err, websocket.ErrBadHandshake) {
+			return nil, errors.New("rejected by peer")
 		}
-		return nil, err
+		slog.Debug("peer connection", "error", err)
+		return nil, errors.New("peer connection error")
 	}
 
 	// ecdh key exchange
@@ -255,6 +257,14 @@ func showModalPopup(txt string, onCanvas fyne.Canvas) {
 	modal.Show()
 }
 
+func createPeerRequestElement(text string, accepted chan<- bool) *fyne.Container {
+	return container.NewHBox(
+		widget.NewLabel(text),
+		widget.NewButton("accept", func() { accepted <- true }),
+		widget.NewButton("decline", func() { accepted <- false }),
+	)
+}
+
 func main() {
 	flag.Parse()
 	peerIP := net.ParseIP(*addr)
@@ -284,14 +294,18 @@ func main() {
 	window := app.NewWindow("Guic")
 	window.Resize(fyne.NewSize(800, 600))
 
+	requestsContainer := container.NewVBox()
 	// UI confirmation for incoming connections
 	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
 		acceptChan := make(chan bool)
-		closer := func() { close(acceptChan) }
-		onAccept := func(accepted bool) { acceptChan <- accepted }
-		dialog.NewConfirm(
-			"Confirm", fmt.Sprintf("Accept client %s connection?", r.RemoteAddr),
-			onAccept, window).Show()
+		// accept chan awaits button press inside element
+		requestElement := createPeerRequestElement(r.RemoteAddr, acceptChan)
+		fyne.Do(func() { requestsContainer.Add(requestElement) })
+		fyne.Do(requestsContainer.Refresh)
+		closer := func() {
+			close(acceptChan)
+			fyne.Do(func() { requestsContainer.Remove(requestElement) })
+		}
 		return acceptChan, closer
 	}
 
@@ -299,7 +313,7 @@ func main() {
 		hub:           hub,
 		peerId:        ourPeerId,
 		privateKey:    privateKey,
-		connectAccept: acceptConnection,
+		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
 	slog.Info("running server", "address", serverAddr)
@@ -345,17 +359,19 @@ func main() {
 			return
 		}
 		// TODO also need to check here if already connected
-		client, err := connect(peerEntry.Text, ourPeerId, privateKey)
-		if err != nil {
-			showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
-			return
-		}
-		hub.RegisterClient(client)
-		peerEntry.SetText("")
-		showModalPopup(
-			fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
-			window.Canvas(),
-		)
+		go func() {
+			client, err := connectToPeer(peerEntry.Text, ourPeerId, privateKey)
+			if err != nil {
+				showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
+				return
+			}
+			hub.RegisterClient(client)
+			fyne.Do(func() { peerEntry.SetText("") })
+			showModalPopup(
+				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
+				window.Canvas(),
+			)
+		}()
 	}
 	peerEntry.OnSubmitted = func(s string) { uiOnConnect() }
 	connEntry := container.NewVBox(
@@ -422,7 +438,13 @@ func main() {
 	chatBorder := container.NewBorder(
 		nil, textSendEntry, nil, nil, placeholderScroll,
 	)
-	content := container.NewHSplit(connContainer, chatBorder)
+	content := container.NewHSplit(
+		container.NewAppTabs(
+			container.NewTabItem("Peers", connContainer),
+			container.NewTabItem("Requests", requestsContainer),
+		),
+		chatBorder,
+	)
 	content.SetOffset(0.3)
 
 	peerList.OnSelected = func(id widget.ListItemID) {
