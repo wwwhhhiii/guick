@@ -27,6 +27,9 @@ import (
 
 var addr = flag.String("addr", "0.0.0.0", "http server address")
 var port = flag.String("port", "8080", "http server port")
+var debug = flag.Bool("debug", false, "debug mode")
+
+var programLevel = slog.LevelInfo
 
 var ourPeerId = uuid.New()
 
@@ -69,6 +72,13 @@ func createPeerRequestElement(text string, accepted chan<- bool) *fyne.Container
 
 func main() {
 	flag.Parse()
+
+	if *debug {
+		programLevel = slog.LevelDebug
+	}
+	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: programLevel})
+	slog.SetDefault(slog.New(h))
+
 	peerIP := net.ParseIP(*addr)
 	if peerIP == nil {
 		slog.Error("Invalid listen addres:", "address", *addr)
