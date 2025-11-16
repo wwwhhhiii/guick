@@ -9,7 +9,9 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/google/uuid"
@@ -139,6 +141,13 @@ func newHub(
 	}
 }
 
+func (hub *Hub) LockedPeekClient(id uuid.UUID) (*Client, bool) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	client, exist := hub.clients[id]
+	return client, exist
+}
+
 // use this to add new clients to hub.
 // client should be connected
 func (hub *Hub) RegisterClient(client *Client) {
@@ -154,9 +163,7 @@ func (hub *Hub) UnregisterClient(client *Client) {
 // shorthand for searching and removing client from hub by UUID.
 // returns error if client with such UUID is not found in hub
 func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	client, exist := hub.clients[clientUUID]
+	client, exist := hub.LockedPeekClient(clientUUID)
 	if !exist {
 		return errors.New("client not registered")
 	}
@@ -164,8 +171,8 @@ func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
 	return nil
 }
 
-// adds client record to hub registry
-func (hub *Hub) registerClient(c *Client) error {
+// adds client to hub registry
+func (hub *Hub) registryAddClient(c *Client) error {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	if _, exist := hub.clients[c.PeerId]; exist {
@@ -175,25 +182,28 @@ func (hub *Hub) registerClient(c *Client) error {
 	return nil
 }
 
+// removes clients from hub registry
+func (hub *Hub) registryRemoveClients(clients ...*Client) {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	for _, client := range clients {
+		delete(hub.clients, client.PeerId)
+	}
+}
+
 // closes connection with the client.
 // deletes client record from a hub.
 // emits client unregistered event.
 func (hub *Hub) disconnectClient(client *Client) error {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
 	if err := client.GracefulDisconnect(); err != nil {
 		client.conn.Close()
 	}
-	delete(hub.clients, client.PeerId)
-	hub.OnClientUnreg <- client
 	return nil
 }
 
 func (hub *Hub) closeClientConnection(client *Client) {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
 	client.conn.Close()
-	delete(hub.clients, client.PeerId)
+	hub.registryRemoveClients(client)
 	hub.OnClientUnreg <- client
 }
 
@@ -201,15 +211,15 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	for {
 		select {
 		case <-interrupt:
-			slog.Info("hub interrupted")
+			slog.Info("hub", "message", "interrupted, shutting down")
 			hub.Shutdown()
 			return
 		case client := <-hub.register:
-			if err := hub.registerClient(client); err != nil {
-				slog.Error("client register error", "error", err, "location", "hub")
+			if err := hub.registryAddClient(client); err != nil {
+				slog.Error("hub", "msg", "client register error", "error", err)
 				continue
 			}
-			slog.Info("client registered", "client", client.PeerId, "location", "hub")
+			slog.Info("hub", "msg", "client registered", "client", client.PeerId)
 			go func() {
 				pingStop := ConfigureClientConnection(client.conn)
 				defer close(pingStop)
@@ -219,22 +229,23 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				}
 				pingStop <- struct{}{}
 				hub.closeClientConnection(client)
-				slog.Info("connection with peer closed", "peerId", client.PeerId)
+				slog.Info("hub", "msg", "connection with peer was closed", "peerId", client.PeerId)
 			}()
 			hub.OnClientReg <- client
 		case client := <-hub.unregister:
 			if err := hub.disconnectClient(client); err != nil {
-				slog.Error("client unregister error", "error", err, "location", "hub")
-				continue
+				slog.Error("hub", "msg", "client disconnect error", "error", err)
 			}
-			slog.Info("client unregistered", "client", client.PeerId, "location", "hub")
+			hub.registryRemoveClients(client)
+			hub.OnClientUnreg <- client
+			slog.Info("hub", "msg", "client unregistered", "client", client.PeerId)
 		case msg := <-hub.sendMessage:
 			client, exist := hub.clients[msg.ToPeerId]
 			if !exist {
 				log.Fatal("unknown peer", msg.ToPeerId)
 			}
 			if err := client.SendMessage(msg.Txt); err != nil {
-				slog.Error("client send message", "error", err)
+				slog.Error("hub", "msg", "client send message", "error", err)
 				continue
 			}
 			hub.OnMsgSent <- msg
@@ -245,14 +256,8 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 }
 
 func (hub *Hub) Shutdown() {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	delKeys := make([]uuid.UUID, len(hub.clients))
+	hub.registryRemoveClients(slices.Collect(maps.Values(hub.clients))...)
 	for _, client := range hub.clients {
-		client.GracefulDisconnect()
-		delKeys = append(delKeys, client.PeerId)
-	}
-	for _, key := range delKeys {
-		delete(hub.clients, key)
+		hub.disconnectClient(client)
 	}
 }
