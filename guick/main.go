@@ -290,11 +290,10 @@ func main() {
 		panic(err)
 	}
 
-	app := app.New()
-	window := app.NewWindow("Guic")
-	window.Resize(fyne.NewSize(800, 600))
+	var application fyne.App
+	var mainWindow fyne.Window
+	var requestsContainer *fyne.Container
 
-	requestsContainer := container.NewVBox()
 	// UI confirmation for incoming connections
 	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
 		acceptChan := make(chan bool)
@@ -318,6 +317,10 @@ func main() {
 	http.HandleFunc("/ws", wsHandler.serveWs)
 	slog.Info("running server", "address", serverAddr)
 	go http.ListenAndServe(serverAddr, nil)
+
+	application = app.New()
+	mainWindow = application.NewWindow("Guic")
+	mainWindow.Resize(fyne.NewSize(800, 600))
 
 	peerEntry := widget.NewEntry()
 	peerEntry.SetPlaceHolder("Peer IP")
@@ -348,28 +351,28 @@ func main() {
 		if err != nil {
 			errTxt := fmt.Sprintf("invalid peer address: %s", err)
 			log.Println(errTxt)
-			showModalPopup(errTxt, window.Canvas())
+			showModalPopup(errTxt, mainWindow.Canvas())
 			return
 		}
 		peerIP := net.ParseIP(host)
 		if peerIP == nil {
 			errTxt := "incorrect IP address format"
 			log.Println(errTxt)
-			showModalPopup(errTxt, window.Canvas())
+			showModalPopup(errTxt, mainWindow.Canvas())
 			return
 		}
 		// TODO also need to check here if already connected
 		go func() {
 			client, err := connectToPeer(peerEntry.Text, ourPeerId, privateKey)
 			if err != nil {
-				showModalPopup(fmt.Sprintf("connection error: %s", err), window.Canvas())
+				showModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas())
 				return
 			}
 			hub.RegisterClient(client)
 			fyne.Do(func() { peerEntry.SetText("") })
 			showModalPopup(
 				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
-				window.Canvas(),
+				mainWindow.Canvas(),
 			)
 		}()
 	}
@@ -387,10 +390,10 @@ func main() {
 				return
 			}
 			if err := hub.UnregisterClientByUUID(selectedPeerId); err != nil {
-				showModalPopup(err.Error(), window.Canvas())
+				showModalPopup(err.Error(), mainWindow.Canvas())
 			}
 		}
-		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, window).Show()
+		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, mainWindow).Show()
 	})
 	removePeerBtn.Disable()
 	connContainer := container.NewBorder(
@@ -406,7 +409,7 @@ func main() {
 			return
 		}
 		if selectedPeerId == uuid.Nil {
-			showModalPopup("Select peer", window.Canvas())
+			showModalPopup("Select peer", mainWindow.Canvas())
 			return
 		}
 		if _, exist := hub.clients[selectedPeerId]; !exist {
@@ -438,6 +441,7 @@ func main() {
 	chatBorder := container.NewBorder(
 		nil, textSendEntry, nil, nil, placeholderScroll,
 	)
+	requestsContainer = container.NewVBox()
 	content := container.NewHSplit(
 		container.NewAppTabs(
 			container.NewTabItem("Peers", connContainer),
@@ -487,14 +491,12 @@ func main() {
 		for {
 			select {
 			case client := <-onClientRegistered:
-				slog.Debug("[UI reactor] registered", "client", client.PeerId)
 				fyneListPeers = append(fyneListPeers, client.PeerId)
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
 				peerScrollWindows[client.PeerId] = container.NewScroll(widget.NewTextGrid())
 			case client := <-onClientUnregistered:
-				slog.Debug("[UI reactor] unregistered", "client", client.PeerId)
 				deleteIdx := -1
 				for i, peerId := range fyneListPeers {
 					if peerId == client.PeerId {
@@ -511,28 +513,26 @@ func main() {
 				}
 				unselectPeer(client.PeerId)
 			case msg := <-onRecvMessage:
-				slog.Debug("[UI reactor] message received", "from", msg.FromPeerAddr)
 				fyne.Do(func() {
 					if scroll, exist := peerScrollWindows[msg.FromPeerId]; exist {
 						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
 					} else {
-						log.Fatalf("[UI reactor] error, no scroll peer found for %s", msg.FromPeerId)
+						log.Fatalf("error, no scroll peer found for %s", msg.FromPeerId)
 					}
 				})
 			case msg := <-onSentMessage:
-				slog.Debug("[UI reactor] message sent", "to", msg.ToPeerAddr)
 				fyne.Do(func() {
 					if scroll, exist := peerScrollWindows[msg.ToPeerId]; exist {
 						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[me]: %s", msg.Txt))
 					} else {
-						log.Fatalf("[UI reactor] error, no scroll peer found for %s", msg.ToPeerAddr)
+						log.Fatalf("error, no scroll peer found for %s", msg.ToPeerAddr)
 					}
 				})
 			}
 		}
 	}()
 
-	window.SetContent(content)
-	window.Show()
-	app.Run()
+	mainWindow.SetContent(content)
+	mainWindow.Show()
+	application.Run()
 }
