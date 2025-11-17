@@ -22,11 +22,12 @@ import (
 )
 
 // TODOS
-// - prevent connection to self
+// - add send of images and gifs
+// - add connection string functionality
 // - add submit functionality for modal popup
 
-var addr = flag.String("addr", "0.0.0.0", "http server address")
-var port = flag.String("port", "8080", "http server port")
+var appHost = flag.String("host", "0.0.0.0", "http server host")
+var appPort = flag.String("port", "8080", "http server port")
 var debug = flag.Bool("debug", false, "debug mode")
 
 var programLevel = slog.LevelInfo
@@ -47,6 +48,8 @@ var peerTextGrids = make(map[uuid.UUID]*widget.TextGrid)
 
 var sentConnectRequests = make(map[string]struct{})
 
+var localAddrs = make(map[string]struct{}, 100)
+
 func main() {
 	flag.Parse()
 
@@ -56,12 +59,36 @@ func main() {
 	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: programLevel})
 	slog.SetDefault(slog.New(h))
 
-	peerIP := net.ParseIP(*addr)
-	if peerIP == nil {
-		slog.Error("Invalid listen addres:", "address", *addr)
+	serverHost := net.ParseIP(*appHost)
+	serverAddr := net.JoinHostPort(*appHost, *appPort)
+	if serverHost == nil {
+		slog.Error("Invalid listen host", "host", *appHost)
 		return
 	}
-	serverAddr := fmt.Sprintf("%s:%s", *addr, *port)
+	if serverHost.IsUnspecified() {
+		// we don't know which iface will be used for accepting the connection.
+		// So need to parse all interfaces addresses to prevent self-connection
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			slog.Error("net interface read", "error", err)
+			return
+		}
+		for _, iface := range ifaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, netaddr := range addrs {
+				ip, _, err := net.ParseCIDR(netaddr.String())
+				if err != nil {
+					continue
+				}
+				localAddrs[net.JoinHostPort(ip.String(), *appPort)] = struct{}{}
+			}
+		}
+	} else {
+		localAddrs[serverAddr] = struct{}{}
+	}
 
 	onClientRegistered := make(chan *Client)
 	onClientUnregistered := make(chan *Client)
@@ -136,26 +163,28 @@ func main() {
 		if peerEntry.Text == "" {
 			return
 		}
-		host, _, err := net.SplitHostPort(peerEntry.Text)
+		host, port, err := net.SplitHostPort(peerEntry.Text)
 		if err != nil {
-			errTxt := fmt.Sprintf("invalid peer address: %s", err)
-			log.Println(errTxt)
-			NewModalPopup(errTxt, mainWindow.Canvas()).Show()
+			NewModalPopup(fmt.Sprintf("invalid peer address: %s", err), mainWindow.Canvas()).Show()
 			return
 		}
-		peerIP := net.ParseIP(host)
-		if peerIP == nil {
-			errTxt := "incorrect IP address format"
-			log.Println(errTxt)
-			NewModalPopup(errTxt, mainWindow.Canvas()).Show()
+		if peerHost := net.ParseIP(host); peerHost == nil {
+			NewModalPopup("incorrect IP address format", mainWindow.Canvas()).Show()
 			return
 		}
-		peerAddress := peerEntry.Text
+		if net.JoinHostPort(host, port) == serverAddr {
+			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
+			return
+		}
+		peerAddress := net.JoinHostPort(host, port)
 		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
 			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
 			return
 		}
-		// TODO also need to check here if already connected
+		if _, exist := localAddrs[peerAddress]; exist {
+			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
+			return
+		}
 		go func() {
 			sentConnectRequests[peerAddress] = struct{}{}
 			defer func() { delete(sentConnectRequests, peerAddress) }()
