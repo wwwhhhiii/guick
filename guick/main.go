@@ -22,7 +22,7 @@ import (
 )
 
 // TODOS
-//
+// - prevent connection to self
 // - add submit functionality for modal popup
 
 var addr = flag.String("addr", "0.0.0.0", "http server address")
@@ -36,14 +36,14 @@ var ourPeerId = uuid.New()
 // current peer to send messages to
 var selectedPeerId = uuid.Nil
 
-// current peer scroll to show and append sent/recv messages to
-var curPeerScroll *container.Scroll = nil
+// current peer text grid to show and append sent/recv messages to
+var curPeerGrid *widget.TextGrid = nil
 
 // a slice just for conversion between fyne list id to app peer UUID
 var fyneListPeers = []uuid.UUID{}
 
 // peer chat containers to select from when selecting current peer in UI
-var peerScrollWindows = make(map[uuid.UUID]*container.Scroll)
+var peerTextGrids = make(map[uuid.UUID]*widget.TextGrid)
 
 var sentConnectRequests = make(map[string]struct{})
 
@@ -259,9 +259,9 @@ func main() {
 		textEntry,
 		textEntryBtn,
 	)
-	placeholderScroll := container.NewScroll(widget.NewTextGrid())
+	placeholderTextGrid := widget.NewTextGrid()
 	chatBorder := container.NewBorder(
-		nil, textSendEntry, nil, nil, placeholderScroll,
+		nil, textSendEntry, nil, nil, placeholderTextGrid,
 	)
 	requestsContainer = container.NewVBox()
 	content := container.NewHSplit(
@@ -279,24 +279,29 @@ func main() {
 			return
 		}
 		selectedPeerId = peerId
-		if _, exist := peerScrollWindows[selectedPeerId]; !exist {
-			peerScrollWindows[selectedPeerId] = container.NewScroll(widget.NewTextGrid())
+		prevPeerGrid := curPeerGrid
+		if _, exist := peerTextGrids[selectedPeerId]; !exist {
+			textGrid := widget.NewTextGrid()
+			textGrid.Scroll = fyne.ScrollVerticalOnly
+			peerTextGrids[selectedPeerId] = textGrid
 		}
-		curPeerScroll = peerScrollWindows[selectedPeerId]
-		chatBorder.Objects[0].(*container.Scroll).Hide()
+		curPeerGrid = peerTextGrids[selectedPeerId]
+		if prevPeerGrid != nil {
+			prevPeerGrid.Hide()
+		}
 		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
 		// because we still want to show it later when client is selected again
-		chatBorder.Objects[0] = curPeerScroll
-		curPeerScroll.Show()
+		chatBorder.Objects[0] = curPeerGrid
+		curPeerGrid.Show()
 		textEntry.Enable()
 		textEntryBtn.Enable()
 		removePeerBtn.Enable()
 	}
 	// remove peer widgets from app window, disble control buttons
 	unselectPeer := func(peerId uuid.UUID) {
-		delete(peerScrollWindows, peerId)
+		delete(peerTextGrids, peerId)
 		// replace with placeholder to delete reference for current peer scroll from UI
-		chatBorder.Objects[0] = container.NewScroll(widget.NewTextGrid())
+		chatBorder.Objects[0] = widget.NewTextGrid()
 		unregisteredSelectedPeer := peerId == selectedPeerId
 		if unregisteredSelectedPeer {
 			selectedPeerId = uuid.Nil
@@ -317,7 +322,9 @@ func main() {
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
-				peerScrollWindows[client.PeerId] = container.NewScroll(widget.NewTextGrid())
+				textGrid := widget.NewTextGrid()
+				textGrid.Scroll = fyne.ScrollVerticalOnly
+				peerTextGrids[client.PeerId] = textGrid
 			case client := <-onClientUnregistered:
 				deleteIdx := -1
 				for i, peerId := range fyneListPeers {
@@ -336,16 +343,16 @@ func main() {
 				unselectPeer(client.PeerId)
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
-					if scroll, exist := peerScrollWindows[msg.FromPeerId]; exist {
-						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
+					if grid, exist := peerTextGrids[msg.FromPeerId]; exist {
+						grid.Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
 					} else {
 						log.Fatalf("error, no scroll peer found for %s", msg.FromPeerId)
 					}
 				})
 			case msg := <-onSentMessage:
 				fyne.Do(func() {
-					if scroll, exist := peerScrollWindows[msg.ToPeerId]; exist {
-						scroll.Content.(*widget.TextGrid).Append(fmt.Sprintf("[me]: %s", msg.Txt))
+					if grid, exist := peerTextGrids[msg.ToPeerId]; exist {
+						grid.Append(fmt.Sprintf("[me]: %s", msg.Txt))
 					} else {
 						log.Fatalf("error, no scroll peer found for %s", msg.ToPeerAddr)
 					}
