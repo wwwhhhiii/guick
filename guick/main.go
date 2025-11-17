@@ -37,7 +37,7 @@ var ourPeerId = uuid.New()
 var selectedPeerId = uuid.Nil
 
 // current peer text grid to show and append sent/recv messages to
-var curPeerGrid *widget.TextGrid = nil
+var curPeerTextGrid *widget.TextGrid = nil
 
 // a slice just for conversion between fyne list id to app peer UUID
 var fyneListPeers = []uuid.UUID{}
@@ -46,31 +46,6 @@ var fyneListPeers = []uuid.UUID{}
 var peerTextGrids = make(map[uuid.UUID]*widget.TextGrid)
 
 var sentConnectRequests = make(map[string]struct{})
-
-func showModalPopup(txt string, onCanvas fyne.Canvas) {
-	// TODO maybe make this a temporary modal that is overwritten
-	var modal *widget.PopUp
-	closeBtn := widget.NewButton("Close", func() {
-		modal.Hide()
-	})
-	popupContent := container.NewVBox(
-		widget.NewLabel(txt),
-		closeBtn,
-	)
-	modal = widget.NewModalPopUp(
-		popupContent,
-		onCanvas,
-	)
-	modal.Show()
-}
-
-func createPeerRequestElement(text string, accepted chan<- bool) *fyne.Container {
-	return container.NewHBox(
-		widget.NewLabel(text),
-		widget.NewButton("✔", func() { accepted <- true }),
-		widget.NewButton("✖", func() { accepted <- false }),
-	)
-}
 
 func main() {
 	flag.Parse()
@@ -112,7 +87,7 @@ func main() {
 	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
 		acceptChan := make(chan bool)
 		// accept chan awaits button press inside element
-		requestElement := createPeerRequestElement(r.RemoteAddr, acceptChan)
+		requestElement := NewPeerRequestElement(r.RemoteAddr, acceptChan)
 		fyne.Do(func() { requestsContainer.Add(requestElement) })
 		fyne.Do(requestsContainer.Refresh)
 		closer := func() {
@@ -165,19 +140,19 @@ func main() {
 		if err != nil {
 			errTxt := fmt.Sprintf("invalid peer address: %s", err)
 			log.Println(errTxt)
-			showModalPopup(errTxt, mainWindow.Canvas())
+			NewModalPopup(errTxt, mainWindow.Canvas()).Show()
 			return
 		}
 		peerIP := net.ParseIP(host)
 		if peerIP == nil {
 			errTxt := "incorrect IP address format"
 			log.Println(errTxt)
-			showModalPopup(errTxt, mainWindow.Canvas())
+			NewModalPopup(errTxt, mainWindow.Canvas()).Show()
 			return
 		}
 		peerAddress := peerEntry.Text
 		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
-			showModalPopup("request already sent", mainWindow.Canvas())
+			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
 			return
 		}
 		// TODO also need to check here if already connected
@@ -186,16 +161,16 @@ func main() {
 			defer func() { delete(sentConnectRequests, peerAddress) }()
 			client, err := ConnectToPeer(peerAddress, ourPeerId, privateKey)
 			if err != nil {
-				showModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas())
+				NewModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas()).Show()
 				return
 			}
 			hub.RegisterClient(client)
-			showModalPopup(
+			NewModalPopup(
 				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
 				mainWindow.Canvas(),
-			)
+			).Show()
 		}()
-		showModalPopup("Request sent", mainWindow.Canvas())
+		NewModalPopup("Request sent", mainWindow.Canvas()).Show()
 		peerEntry.SetText("")
 	}
 	peerEntry.OnSubmitted = func(s string) { uiOnConnect() }
@@ -212,7 +187,7 @@ func main() {
 				return
 			}
 			if err := hub.UnregisterClientByUUID(selectedPeerId); err != nil {
-				showModalPopup(err.Error(), mainWindow.Canvas())
+				NewModalPopup(err.Error(), mainWindow.Canvas()).Show()
 			}
 		}
 		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, mainWindow).Show()
@@ -231,7 +206,7 @@ func main() {
 			return
 		}
 		if selectedPeerId == uuid.Nil {
-			showModalPopup("Select peer", mainWindow.Canvas())
+			NewModalPopup("Select peer", mainWindow.Canvas()).Show()
 			return
 		}
 		if _, exist := hub.clients[selectedPeerId]; !exist {
@@ -279,20 +254,18 @@ func main() {
 			return
 		}
 		selectedPeerId = peerId
-		prevPeerGrid := curPeerGrid
+		prevPeerGrid := curPeerTextGrid
 		if _, exist := peerTextGrids[selectedPeerId]; !exist {
-			textGrid := widget.NewTextGrid()
-			textGrid.Scroll = fyne.ScrollVerticalOnly
-			peerTextGrids[selectedPeerId] = textGrid
+			peerTextGrids[selectedPeerId] = NewPeerTextGrid()
 		}
-		curPeerGrid = peerTextGrids[selectedPeerId]
+		curPeerTextGrid = peerTextGrids[selectedPeerId]
 		if prevPeerGrid != nil {
 			prevPeerGrid.Hide()
 		}
 		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
 		// because we still want to show it later when client is selected again
-		chatBorder.Objects[0] = curPeerGrid
-		curPeerGrid.Show()
+		chatBorder.Objects[0] = curPeerTextGrid
+		curPeerTextGrid.Show()
 		textEntry.Enable()
 		textEntryBtn.Enable()
 		removePeerBtn.Enable()
@@ -313,7 +286,8 @@ func main() {
 		}
 	}
 
-	// UI reactor
+	// a UI reactor
+	// essentially reads events from hub channels and updates relevant UI components
 	go func() {
 		for {
 			select {
@@ -322,9 +296,7 @@ func main() {
 				fyne.Do(func() {
 					peerList.Refresh()
 				})
-				textGrid := widget.NewTextGrid()
-				textGrid.Scroll = fyne.ScrollVerticalOnly
-				peerTextGrids[client.PeerId] = textGrid
+				peerTextGrids[client.PeerId] = NewPeerTextGrid()
 			case client := <-onClientUnregistered:
 				deleteIdx := -1
 				for i, peerId := range fyneListPeers {
@@ -353,6 +325,7 @@ func main() {
 				fyne.Do(func() {
 					if grid, exist := peerTextGrids[msg.ToPeerId]; exist {
 						grid.Append(fmt.Sprintf("[me]: %s", msg.Txt))
+						grid.ScrollToBottom()
 					} else {
 						log.Fatalf("error, no scroll peer found for %s", msg.ToPeerAddr)
 					}
