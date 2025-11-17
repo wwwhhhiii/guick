@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 
 	"github.com/google/uuid"
+	"golang.design/x/clipboard"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -23,7 +25,6 @@ import (
 
 // TODOS
 // - add send of images and gifs
-// - add connection string functionality
 // - add submit functionality for modal popup
 
 var appHost = flag.String("host", "0.0.0.0", "http server host")
@@ -68,6 +69,9 @@ func main() {
 	if serverHost.IsUnspecified() {
 		// we don't know which iface will be used for accepting the connection.
 		// So need to parse all interfaces addresses to prevent self-connection
+
+		// hack to add 0.0.0.0 address
+		localAddrs[net.JoinHostPort(net.IPv4zero.String(), *appPort)] = struct{}{}
 		ifaces, err := net.Interfaces()
 		if err != nil {
 			slog.Error("net interface read", "error", err)
@@ -138,8 +142,8 @@ func main() {
 	mainWindow = application.NewWindow("Guic")
 	mainWindow.Resize(fyne.NewSize(800, 600))
 
-	peerEntry := widget.NewEntry()
-	peerEntry.SetPlaceHolder("Peer IP")
+	peerAddressEntry := widget.NewEntry()
+	peerAddressEntry.SetPlaceHolder("Peer IP / Connection String")
 
 	peerList := widget.NewList(
 		func() int { return len(fyneListPeers) },
@@ -160,29 +164,34 @@ func main() {
 	)
 
 	uiOnConnect := func() {
-		if peerEntry.Text == "" {
+		if peerAddressEntry.Text == "" {
 			return
 		}
-		host, port, err := net.SplitHostPort(peerEntry.Text)
-		if err != nil {
-			NewModalPopup(fmt.Sprintf("invalid peer address: %s", err), mainWindow.Canvas()).Show()
-			return
+		var peerAddress string
+		// treat it as connection string first
+		conndata, err := base64.StdEncoding.DecodeString(peerAddressEntry.Text)
+		if err == nil {
+			peerAddress = string(conndata)
+		} else {
+			// if connection string parse failed
+			host, port, err := net.SplitHostPort(peerAddressEntry.Text)
+			if err != nil {
+				NewModalPopup(fmt.Sprintf("invalid peer address: %s", err), mainWindow.Canvas()).Show()
+				return
+			}
+			if peerHost := net.ParseIP(host); peerHost == nil {
+				NewModalPopup("incorrect IP address format", mainWindow.Canvas()).Show()
+				return
+			}
+			peerAddress = net.JoinHostPort(host, port)
 		}
-		if peerHost := net.ParseIP(host); peerHost == nil {
-			NewModalPopup("incorrect IP address format", mainWindow.Canvas()).Show()
-			return
-		}
-		if net.JoinHostPort(host, port) == serverAddr {
-			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
-			return
-		}
-		peerAddress := net.JoinHostPort(host, port)
-		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
-			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
-			return
-		}
+
 		if _, exist := localAddrs[peerAddress]; exist {
 			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
+			return
+		}
+		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
+			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
 			return
 		}
 		go func() {
@@ -200,11 +209,11 @@ func main() {
 			).Show()
 		}()
 		NewModalPopup("Request sent", mainWindow.Canvas()).Show()
-		peerEntry.SetText("")
+		peerAddressEntry.SetText("")
 	}
-	peerEntry.OnSubmitted = func(s string) { uiOnConnect() }
+	peerAddressEntry.OnSubmitted = func(s string) { uiOnConnect() }
 	connEntry := container.NewVBox(
-		peerEntry,
+		peerAddressEntry,
 		widget.NewButton("Connect", uiOnConnect),
 	)
 	removePeerBtn := widget.NewButton("Remove", func() {
@@ -222,8 +231,17 @@ func main() {
 		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, mainWindow).Show()
 	})
 	removePeerBtn.Disable()
+	cpyConnStringBtn := widget.NewButton("Copy connection string", func() {
+		if err := clipboard.Init(); err != nil {
+			NewModalPopup("clipboard not available", mainWindow.Canvas()).Show()
+			return
+		}
+		condata := []byte(serverAddr)
+		clipboard.Write(clipboard.FmtText, []byte(base64.StdEncoding.EncodeToString(condata)))
+		NewModalPopup("copied to clipboard", mainWindow.Canvas()).Show()
+	})
 	connContainer := container.NewBorder(
-		connEntry,
+		container.NewVBox(connEntry, cpyConnStringBtn),
 		nil, nil, nil,
 		container.NewBorder(nil, removePeerBtn, nil, nil, peerList),
 	)
