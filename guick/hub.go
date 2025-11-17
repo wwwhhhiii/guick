@@ -130,10 +130,10 @@ func newHub(
 ) *Hub {
 	return &Hub{
 		clients:       make(map[uuid.UUID]*Client, 100),
-		register:      make(chan *Client, 100),
-		unregister:    make(chan *Client, 100),
-		sendMessage:   make(chan *Message, 100),
-		recvMessage:   make(chan *Message, 100),
+		register:      make(chan *Client),
+		unregister:    make(chan *Client),
+		sendMessage:   make(chan *Message),
+		recvMessage:   make(chan *Message),
 		OnClientReg:   onClientReg,
 		OnClientUnreg: onClientUnreg,
 		OnMsgRecv:     onMsgRecv,
