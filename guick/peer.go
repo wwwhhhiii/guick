@@ -25,22 +25,21 @@ const (
 	writeWait  = 10 * time.Second
 )
 
-type Client struct {
-
-	// client peer id
+type Peer struct {
+	// chat peer belongs to
+	ChatId uuid.UUID
 	PeerId uuid.UUID
-
-	// connection with the client
+	// peer connection
 	conn *websocket.Conn
-
-	// Type of connection that was created. Either from server side or client side
+	// who is this peer: client or a server
 	connType ConnType
-
+	// encryption block to communicate with peer
 	aesgcm cipher.AEAD
 }
 
-func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Client {
-	return &Client{
+func NewPeer(chatId uuid.UUID, peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Peer {
+	return &Peer{
+		ChatId:   chatId,
 		PeerId:   peerId,
 		conn:     conn,
 		connType: connT,
@@ -48,16 +47,16 @@ func NewClient(peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm ci
 	}
 }
 
-// gracefully closes client connection
-func (client *Client) GracefulDisconnect() error {
-	return client.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
+// gracefully closes peer connection
+func (p *Peer) GracefulDisconnect() error {
+	return p.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
 		websocket.CloseNormalClosure, ""),
 	)
 }
 
-// encrypts and writes message to underlying client connection
-func (client *Client) SendMessage(text string) error {
-	encryptedMessage, err := EncryptMessage(text, client.aesgcm)
+// encrypts and writes message to underlying peer connection
+func (p *Peer) SendMessage(text string) error {
+	encryptedMessage, err := EncryptMessage(text, p.aesgcm)
 	if err != nil {
 		return err
 	}
@@ -66,7 +65,7 @@ func (client *Client) SendMessage(text string) error {
 		return err
 	}
 	// TODO: change message type to websocket.BinaryMessage
-	if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := p.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return err
 	}
 	return nil
@@ -99,40 +98,40 @@ func ConfigureClientConnection(connection *websocket.Conn) {
 	})
 }
 
-func (client *Client) ReadMessagesGen() <-chan *Message {
+func (p *Peer) ReadMessagesGen() <-chan *Message {
 	out := make(chan *Message)
 	go func() {
 		defer close(out)
 		for {
-			messageType, data, err := client.conn.ReadMessage()
+			messageType, data, err := p.conn.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-					slog.Info("connection closed by peer", "peerId", client.PeerId)
+					slog.Info("connection closed by peer", "peerId", p.PeerId)
 					break
 				}
-				slog.Error("peer connection read", "peerId", client.PeerId, "error", err)
+				slog.Error("peer connection read", "peerId", p.PeerId, "error", err)
 				break
 			}
 			if messageType != websocket.TextMessage {
 				slog.Error(
 					"received unexpected non-text message",
-					"peerId", client.PeerId,
+					"peerId", p.PeerId,
 					"messageType", messageType,
 					"message", data,
 				)
 				continue
 			}
-			plaintext, err := DecryptMessageData(data, client.aesgcm)
+			plaintext, err := DecryptMessageData(data, p.aesgcm)
 			if err != nil {
 				slog.Error("message data decrypt", "error", err)
 				continue
 			}
 			out <- NewMsg(
 				plaintext,
-				client.PeerId,
+				p.PeerId,
 				ourPeerId,
-				client.conn.RemoteAddr().String(),
-				client.conn.LocalAddr().String(),
+				p.conn.RemoteAddr().String(),
+				p.conn.LocalAddr().String(),
 			)
 		}
 	}()
