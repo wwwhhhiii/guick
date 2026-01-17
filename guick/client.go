@@ -83,7 +83,7 @@ func StartConnPing(connection *websocket.Conn, pingInterval time.Duration, stop 
 				slog.Error("write ping message", "error", err)
 				return
 			}
-			slog.Info("ping", "who", connection.RemoteAddr())
+			slog.Debug("ping", "who", connection.RemoteAddr())
 		case <-stop:
 			return
 		}
