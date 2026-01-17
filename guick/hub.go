@@ -220,9 +220,11 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				continue
 			}
 			slog.Info("hub", "msg", "client registered", "client", client.PeerId)
+			ConfigureClientConnection(client.conn)
+			pingStop := make(chan struct{})
+			defer close(pingStop)
+			go StartConnPing(client.conn, pingPeriod, pingStop)
 			go func() {
-				pingStop := ConfigureClientConnection(client.conn)
-				defer close(pingStop)
 				for msg := range client.ReadMessagesGen() {
 					hub.recvMessage <- msg
 					// reading stops when peer connection is closed or broken

@@ -72,7 +72,7 @@ func (client *Client) SendMessage(text string) error {
 	return nil
 }
 
-func StartConnectionPing(connection *websocket.Conn, pingInterval time.Duration, stop <-chan struct{}) {
+func StartConnPing(connection *websocket.Conn, pingInterval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	for {
@@ -90,16 +90,13 @@ func StartConnectionPing(connection *websocket.Conn, pingInterval time.Duration,
 	}
 }
 
-func ConfigureClientConnection(connection *websocket.Conn) chan<- struct{} {
+func ConfigureClientConnection(connection *websocket.Conn) {
 	connection.SetReadLimit(maxMessageSizeBytes)
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(appData string) error {
 		connection.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
-	pingStop := make(chan struct{})
-	go StartConnectionPing(connection, pingPeriod, pingStop)
-	return pingStop
 }
 
 func (client *Client) ReadMessagesGen() <-chan *Message {
