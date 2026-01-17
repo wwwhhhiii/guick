@@ -9,9 +9,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"maps"
 	"os"
-	"slices"
 	"sync"
 
 	"github.com/google/uuid"
@@ -19,7 +17,7 @@ import (
 
 type Message struct {
 	FromPeerId   uuid.UUID
-	ToPeerId     uuid.UUID
+	ToChatId     uuid.UUID
 	FromPeerAddr string
 	ToPeerAddr   string
 	Txt          string `json:"text"`
@@ -28,14 +26,14 @@ type Message struct {
 func NewMsg(
 	txt string,
 	fromPeerId uuid.UUID,
-	toPeerId uuid.UUID,
+	toChatId uuid.UUID,
 	fromPeerAddr string,
 	toPeerAddr string,
 ) *Message {
 	return &Message{
 		Txt:          txt,
 		FromPeerId:   fromPeerId,
-		ToPeerId:     toPeerId,
+		ToChatId:     toChatId,
 		FromPeerAddr: fromPeerAddr,
 		ToPeerAddr:   toPeerAddr,
 	}
@@ -54,10 +52,10 @@ func NewEncryptedMessage(ciphertext []byte, nonce []byte) *EncryptedMessage {
 }
 
 // decrypts structured peer message data into plaintext
-func DecryptMessageData(data []byte, aesgcm cipher.AEAD) (string, error) {
+func DecryptMessageData(data []byte, aesgcm cipher.AEAD) ([]byte, error) {
 	message := &EncryptedMessage{}
 	if err := json.Unmarshal(data, message); err != nil {
-		return "", err
+		return nil, err
 	}
 	return DecryptMessage(message.Ciphertext, message.Nonce, aesgcm)
 }
@@ -70,184 +68,213 @@ func AesGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func EncryptMessage(plaintext string, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
+func EncryptMessage(plaintext []byte, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
 	nonce := make([]byte, aesgcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
-	ciphertext := aesgcm.Seal(nil, nonce, []byte(plaintext), nil)
+	ciphertext := aesgcm.Seal(nil, nonce, plaintext, nil)
 	return NewEncryptedMessage(ciphertext, nonce), nil
 }
 
-func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) (string, error) {
+func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
 	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(plaintext), nil
+	return plaintext, nil
+}
+
+type Chat struct {
+	mu    sync.RWMutex
+	id    uuid.UUID
+	peers map[uuid.UUID]*Peer
+}
+
+func NewChat(id uuid.UUID) *Chat {
+	return &Chat{
+		id:    id,
+		peers: make(map[uuid.UUID]*Peer, 100),
+	}
+}
+
+func (c *Chat) addPeers(peers ...*Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range peers {
+		if _, exist := c.peers[p.PeerId]; !exist {
+			c.peers[p.PeerId] = p
+		}
+	}
+}
+
+func (c *Chat) rmPeers(peers ...*Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, peer := range peers {
+		delete(c.peers, peer.PeerId)
+	}
+}
+
+func (c *Chat) sendMessage(m *Message) error {
+	if m.ToChatId != c.id {
+		return errors.New("message mismatched chat id")
+	}
+	for id, peer := range c.peers {
+		if id == m.FromPeerId {
+			continue
+		}
+		peer.SendMessage(m.Txt)
+	}
+	return nil
 }
 
 type Hub struct {
 	mu sync.RWMutex
-
-	// mapping of peer id to its client representation
-	clients map[uuid.UUID]*Client
-
+	// registry of chats with peers
+	chats map[uuid.UUID]*Chat
 	// peer to register in a hub
-	register chan *Client
-
+	register chan *Peer
 	// peer id to unregister and close connection to it
-	unregister chan *Client
-
-	// coming from client
+	unregister chan *Peer
+	// coming from peer
 	sendMessage chan *Message
-
 	// coming from goroutine listening to peer messages
 	recvMessage chan *Message
-
-	// Clients successfuly registered in hub are sent here.
-	// Use this to receive registred clients events
-	OnClientReg chan<- *Client
-
-	// Sends clients that were unregistered in hub.
-	// Use this to receive registered clients events
-	OnClientUnreg chan<- *Client
-
+	// Peers successfuly registered in hub are sent here.
+	// Use this to receive registred peers events
+	OnPeerRegister chan<- *Peer
+	// Sends peers that were unregistered in hub.
+	// Use this to receive registered peers events
+	OnPeerUnregister chan<- *Peer
 	// Sends messages that were received from peers.
 	// Use this to receive messages from peers
 	OnMsgRecv chan<- *Message
-
 	// Sends messages that were sent to peer.
 	// Use this to receive messages that you sent
 	OnMsgSent chan<- *Message
 }
 
 func newHub(
-	onClientReg chan<- *Client,
-	onClientUnreg chan<- *Client,
+	onClientReg chan<- *Peer,
+	onClientUnreg chan<- *Peer,
 	onMsgRecv chan<- *Message,
 	onMsgSent chan<- *Message,
 ) *Hub {
 	return &Hub{
-		clients:       make(map[uuid.UUID]*Client, 100),
-		register:      make(chan *Client),
-		unregister:    make(chan *Client),
-		sendMessage:   make(chan *Message),
-		recvMessage:   make(chan *Message),
-		OnClientReg:   onClientReg,
-		OnClientUnreg: onClientUnreg,
-		OnMsgRecv:     onMsgRecv,
-		OnMsgSent:     onMsgSent,
+		chats:            make(map[uuid.UUID]*Chat, 100),
+		register:         make(chan *Peer),
+		unregister:       make(chan *Peer),
+		sendMessage:      make(chan *Message),
+		recvMessage:      make(chan *Message),
+		OnPeerRegister:   onClientReg,
+		OnPeerUnregister: onClientUnreg,
+		OnMsgRecv:        onMsgRecv,
+		OnMsgSent:        onMsgSent,
 	}
 }
 
-func (hub *Hub) LockedPeekClient(id uuid.UUID) (*Client, bool) {
+func (hub *Hub) LockedPeekChat(id uuid.UUID) (*Chat, bool) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	client, exist := hub.clients[id]
-	return client, exist
+	chat, exist := hub.chats[id]
+	return chat, exist
 }
 
-// use this to add new clients to hub.
-// client should be connected
-func (hub *Hub) RegisterClient(client *Client) {
-	hub.register <- client
+// use this to add new peers to hub.
+// peer should be connected
+func (hub *Hub) RegisterPeer(p *Peer) {
+	hub.register <- p
 }
 
-// use this to delete clients from hub.
-// wil disconnect client and do all necessary cleanups
-func (hub *Hub) UnregisterClient(client *Client) {
-	hub.unregister <- client
+// use this to delete peer from hub.
+// wil disconnect peer and do all necessary cleanups
+func (hub *Hub) UnregisterClient(p *Peer) {
+	hub.unregister <- p
 }
 
 // shorthand for searching and removing client from hub by UUID.
 // returns error if client with such UUID is not found in hub
-func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
-	client, exist := hub.LockedPeekClient(clientUUID)
+// func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
+// 	client, exist := hub.LockedPeekClient(clientUUID)
+// 	if !exist {
+// 		return errors.New("client not registered")
+// 	}
+// 	hub.unregister <- client
+// 	return nil
+// }
+
+func (hub *Hub) getOrCreateChat(id uuid.UUID) *Chat {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	chat, exist := hub.chats[id]
 	if !exist {
-		return errors.New("client not registered")
+		chat = NewChat(id)
+		hub.chats[chat.id] = chat
 	}
-	hub.unregister <- client
-	return nil
+	return chat
 }
 
-// adds client to hub registry
-func (hub *Hub) registryAddClient(c *Client) error {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	if _, exist := hub.clients[c.PeerId]; exist {
-		return errors.New("peer already registered")
-	}
-	hub.clients[c.PeerId] = c
-	return nil
-}
-
-// removes clients from hub registry
-func (hub *Hub) registryRemoveClients(clients ...*Client) {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	for _, client := range clients {
-		delete(hub.clients, client.PeerId)
-	}
-}
-
-// closes connection with the client.
-// deletes client record from a hub.
-// emits client unregistered event.
-func (hub *Hub) disconnectClient(client *Client) error {
-	if err := client.GracefulDisconnect(); err != nil {
-		client.conn.Close()
+// closes connection with the peer.
+// deletes peer record from a chat.
+// emits peer unregistered event.
+func (hub *Hub) disconnectPeer(p *Peer) error {
+	if err := p.GracefulDisconnect(); err != nil {
+		p.conn.Close()
 	}
 	return nil
 }
 
-func (hub *Hub) closeClientConnection(client *Client) {
-	client.conn.Close()
-	hub.registryRemoveClients(client)
-	hub.OnClientUnreg <- client
+func (hub *Hub) closePeerConnection(p *Peer) {
+	p.conn.Close()
 }
 
 func (hub *Hub) Run(interrupt <-chan os.Signal) {
 	for {
 		select {
 		case <-interrupt:
-			slog.Info("hub", "message", "interrupted, shutting down")
+			slog.Info("received interrupt signal")
 			hub.Shutdown()
 			return
-		case client := <-hub.register:
-			if err := hub.registryAddClient(client); err != nil {
-				slog.Error("hub", "msg", "client register error", "error", err)
-				continue
-			}
-			slog.Info("hub", "msg", "client registered", "client", client.PeerId)
-			ConfigureClientConnection(client.conn)
+		case peer := <-hub.register:
+			chat := hub.getOrCreateChat(peer.ChatId)
+			chat.addPeers(peer)
+			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
 			pingStop := make(chan struct{})
-			defer close(pingStop)
-			go StartConnPing(client.conn, pingPeriod, pingStop)
+			go StartConnPing(peer.conn, pingPeriod, pingStop)
 			go func() {
-				for msg := range client.ReadMessagesGen() {
+				defer close(pingStop)
+				for msg := range peer.ReadMessagesGen() {
 					hub.recvMessage <- msg
-					// reading stops when peer connection is closed or broken
+					// reading stops when peer connection is closed by peer or broken
 				}
 				pingStop <- struct{}{}
-				hub.closeClientConnection(client)
-				slog.Info("hub", "msg", "connection with peer was closed", "peerId", client.PeerId)
+				hub.closePeerConnection(peer)
+				slog.Info("closed peer connection", "peerId", peer.PeerId)
+				chat.rmPeers(peer)
+				slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
+				hub.OnPeerUnregister <- peer
 			}()
-			hub.OnClientReg <- client
-		case client := <-hub.unregister:
-			if err := hub.disconnectClient(client); err != nil {
-				slog.Error("hub", "msg", "client disconnect error", "error", err)
+			hub.OnPeerRegister <- peer
+		case peer := <-hub.unregister:
+			// TODO mb chat.disconnectPeer?
+			if err := hub.disconnectPeer(peer); err != nil {
+				slog.Error("peer disconnect", "error", err)
 			}
-			hub.registryRemoveClients(client)
-			hub.OnClientUnreg <- client
-			slog.Info("hub", "msg", "client unregistered", "client", client.PeerId)
+			// TODO remove chat if no peers left?
+			chat, exist := hub.LockedPeekChat(peer.ChatId)
+			if exist {
+				chat.rmPeers(peer)
+			}
+			hub.OnPeerUnregister <- peer
+			slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
 		case msg := <-hub.sendMessage:
-			client, exist := hub.clients[msg.ToPeerId]
+			chat, exist := hub.chats[msg.ToChatId]
 			if !exist {
-				log.Fatal("unknown peer", msg.ToPeerId)
+				log.Fatal("send message", "unknown chat id", msg.ToChatId)
 			}
-			if err := client.SendMessage(msg.Txt); err != nil {
-				slog.Error("hub", "msg", "client send message", "error", err)
+			if err := chat.sendMessage(msg); err != nil {
+				slog.Error("send message", "error", err)
 				continue
 			}
 			hub.OnMsgSent <- msg
@@ -258,8 +285,11 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 }
 
 func (hub *Hub) Shutdown() {
-	hub.registryRemoveClients(slices.Collect(maps.Values(hub.clients))...)
-	for _, client := range hub.clients {
-		hub.disconnectClient(client)
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	for _, chat := range hub.chats {
+		for _, peer := range chat.peers {
+			hub.disconnectPeer(peer)
+		}
 	}
 }

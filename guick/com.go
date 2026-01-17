@@ -18,6 +18,12 @@ import (
 
 var upgrader = websocket.Upgrader{}
 
+// peer that initiated the connection sends this data
+type connectingPeerData struct {
+	ChatId uuid.UUID `json:"chatId"`
+	PeerId uuid.UUID `json:"peerId"`
+}
+
 type wsServeHandler struct {
 	hub        *Hub
 	privateKey *ecdh.PrivateKey
@@ -92,50 +98,57 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// peerId exchange
-	_, msgData, err := conn.ReadMessage()
+	// exchange app info
+	_, encryptedData, err := conn.ReadMessage()
 	if err != nil {
-		slog.Error("peer UUID read error", "error", err)
+		slog.Error("peer info read", "error", err)
 		return
 	}
-	uuidText, err := DecryptMessageData(msgData, aesgcm)
+	slog.Debug("xxx", "connecting peer encrypted data", encryptedData)
+	decryptedData, err := DecryptMessageData(encryptedData, aesgcm)
 	if err != nil {
+		slog.Error("peer message decrypt", "error", err)
 		return
 	}
-	peerId, err := uuid.Parse(uuidText)
-	if err != nil {
-		slog.Error("UUID parse error", "error", err)
+	slog.Debug("xxx", "connecting peer decrypted data", decryptedData)
+	jsonPeerData := &connectingPeerData{}
+	if err = json.Unmarshal(decryptedData, jsonPeerData); err != nil {
+		slog.Error("peer info unmarshal", "error", err)
 		return
 	}
-	slog.Info("incoming peer connection", "peer", uuidText)
-	if peerId == wsh.peerId {
+	slog.Info("incoming peer connection", "peer", jsonPeerData.PeerId)
+	if jsonPeerData.PeerId == wsh.peerId {
 		slog.Error("tried to connect to self, closing connection...")
 		return
 	}
-	encMsg, err := EncryptMessage(wsh.peerId.String(), aesgcm)
+	encMsg, err := EncryptMessage([]byte(wsh.peerId.String()), aesgcm)
 	if err != nil {
 		return
 	}
-	msgData, err = json.Marshal(encMsg)
+	encryptedData, err = json.Marshal(encMsg)
 	if err != nil {
 		return
 	}
-	if err = conn.WriteMessage(websocket.BinaryMessage, msgData); err != nil {
+	if err = conn.WriteMessage(websocket.BinaryMessage, encryptedData); err != nil {
 		slog.Error("peer UUID send error", "error", err)
 		return
 	}
-	// TODO here we assuming that we are ok after sending our peer id,
+	// TODO here we assume that we are ok after sending our peer id,
 	// but we may be not ok if the client did not recv our peer id, (or some other err occured)
 	// so we need some response that he registered us?
-	wsh.hub.RegisterClient(NewClient(peerId, conn, TypeServer, aesgcm))
+	wsh.hub.RegisterPeer(
+		NewPeer(jsonPeerData.ChatId, jsonPeerData.PeerId, conn, TypeServer, aesgcm),
+	)
 }
 
 // tries to connect to a peer. returns peer as client struct
+// chatId is id of the peer chat we are connecting to
 func ConnectToPeer(
 	addr string,
+	chatId uuid.UUID,
 	ourPeerId uuid.UUID,
 	privateKey *ecdh.PrivateKey,
-) (*Client, error) {
+) (*Peer, error) {
 	url := url.URL{Scheme: "ws", Host: addr, Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", addr)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
@@ -147,6 +160,7 @@ func ConnectToPeer(
 		return nil, errors.New("peer connection error")
 	}
 
+	// establish encryption first
 	// ecdh key exchange and encryption key derivation
 	publicKeyData, err := x509.MarshalPKIXPublicKey(privateKey.PublicKey())
 	if err != nil {
@@ -188,38 +202,44 @@ func ConnectToPeer(
 		return nil, err
 	}
 
-	// peerId exchange
-	msg, err := EncryptMessage(ourPeerId.String(), aesgcm)
+	// exchange app info
+	jsonPeerData, err := json.Marshal(&connectingPeerData{chatId, ourPeerId})
 	if err != nil {
 		return nil, err
 	}
-	data, err := json.Marshal(msg)
+	slog.Debug("xxx", "connecting peer decrypted data", jsonPeerData)
+	encryptedMsg, err := EncryptMessage(jsonPeerData, aesgcm)
 	if err != nil {
 		return nil, err
 	}
-	err = conn.WriteMessage(websocket.BinaryMessage, data)
+	encryptedData, err := json.Marshal(encryptedMsg)
 	if err != nil {
-		slog.Error("error sending peer UUID", "error", err)
+		return nil, err
+	}
+	slog.Debug("xxx", "connecting peer encrypted data", encryptedData)
+	err = conn.WriteMessage(websocket.BinaryMessage, encryptedData)
+	if err != nil {
+		slog.Error("peer info send", "error", err)
 		return nil, err
 	}
 	_, msgData, err := conn.ReadMessage()
 	if err != nil {
-		slog.Error("server peer UUID read error", "error", err)
+		slog.Error("peer info read", "error", err)
 		return nil, err
 	}
-	uuidText, err := DecryptMessageData(msgData, aesgcm)
+	uuidData, err := DecryptMessageData(msgData, aesgcm)
 	if err != nil {
 		return nil, err
 	}
-	serverPeerId, err := uuid.Parse(uuidText)
+	serverPeerId, err := uuid.Parse(string(uuidData))
 	if err != nil {
-		slog.Error("error parsing server peer UUID", "error", err, "message", msg)
+		slog.Error("peer uuid parse", "error", err, "message", encryptedMsg)
 		return nil, err
 	}
 	if serverPeerId == ourPeerId {
-		slog.Error("tried to connect to self, closing...")
+		slog.Error("peer connection", "error", "self connection")
 		conn.Close()
 		return nil, errors.New("self connection")
 	}
-	return NewClient(serverPeerId, conn, TypeClient, aesgcm), nil
+	return NewPeer(chatId, serverPeerId, conn, TypeClient, aesgcm), nil
 }

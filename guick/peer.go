@@ -56,7 +56,7 @@ func (p *Peer) GracefulDisconnect() error {
 
 // encrypts and writes message to underlying peer connection
 func (p *Peer) SendMessage(text string) error {
-	encryptedMessage, err := EncryptMessage(text, p.aesgcm)
+	encryptedMessage, err := EncryptMessage([]byte(text), p.aesgcm)
 	if err != nil {
 		return err
 	}
@@ -72,6 +72,12 @@ func (p *Peer) SendMessage(text string) error {
 }
 
 func StartConnPing(connection *websocket.Conn, pingInterval time.Duration, stop <-chan struct{}) {
+	connection.SetReadLimit(maxMessageSizeBytes)
+	connection.SetReadDeadline(time.Now().Add(pongWait))
+	connection.SetPongHandler(func(appData string) error {
+		connection.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	for {
@@ -87,15 +93,6 @@ func StartConnPing(connection *websocket.Conn, pingInterval time.Duration, stop 
 			return
 		}
 	}
-}
-
-func ConfigureClientConnection(connection *websocket.Conn) {
-	connection.SetReadLimit(maxMessageSizeBytes)
-	connection.SetReadDeadline(time.Now().Add(pongWait))
-	connection.SetPongHandler(func(appData string) error {
-		connection.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
 }
 
 func (p *Peer) ReadMessagesGen() <-chan *Message {
@@ -121,15 +118,15 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 				)
 				continue
 			}
-			plaintext, err := DecryptMessageData(data, p.aesgcm)
+			decryptedData, err := DecryptMessageData(data, p.aesgcm)
 			if err != nil {
 				slog.Error("message data decrypt", "error", err)
 				continue
 			}
 			out <- NewMsg(
-				plaintext,
+				string(decryptedData),
 				p.PeerId,
-				ourPeerId,
+				p.ChatId,
 				p.conn.RemoteAddr().String(),
 				p.conn.LocalAddr().String(),
 			)

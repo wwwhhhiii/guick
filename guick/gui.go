@@ -30,7 +30,7 @@ func NewPeerRequestElement(text string, accepted chan<- bool) *fyne.Container {
 	)
 }
 
-func NewPeerTextGrid() *widget.TextGrid {
+func NewChatTextGrid() *widget.TextGrid {
 	textGrid := widget.NewTextGrid()
 	textGrid.Scroll = fyne.ScrollBoth
 	return textGrid

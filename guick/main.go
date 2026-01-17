@@ -24,7 +24,7 @@ import (
 )
 
 // TODOS
-// - add chats
+// - implement everything as a chat *in-progress
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
@@ -37,17 +37,17 @@ var programLevel = slog.LevelInfo
 
 var ourPeerId = uuid.New()
 
-// current peer to send messages to
-var selectedPeerId = uuid.Nil
+// current chat to send messages to
+var selectedChatId = uuid.Nil
 
-// current peer text grid to show and append sent/recv messages to
-var curPeerTextGrid *widget.TextGrid = nil
+// current chat text grid to show and append sent/recv messages to
+var curChatTextGrid *widget.TextGrid = nil
 
-// a slice just for conversion between fyne list id to app peer UUID
-var fyneListPeers = []uuid.UUID{}
+// a slice just for conversion between fyne list id to app chat UUID
+var fyneChatList = []uuid.UUID{}
 
-// peer chat containers to select from when selecting current peer in UI
-var peerTextGrids = make(map[uuid.UUID]*widget.TextGrid)
+// chat containers to select from when selecting current chat in UI
+var chatTextGrids = make(map[uuid.UUID]*widget.TextGrid)
 
 var sentConnectRequests = make(map[string]struct{})
 
@@ -96,11 +96,11 @@ func main() {
 		localAddrs[serverAddr] = struct{}{}
 	}
 
-	onClientRegistered := make(chan *Client)
-	onClientUnregistered := make(chan *Client)
+	onPeerRegistered := make(chan *Peer)
+	onPeerUnregistered := make(chan *Peer)
 	onRecvMessage := make(chan *Message)
 	onSentMessage := make(chan *Message)
-	hub := newHub(onClientRegistered, onClientUnregistered, onRecvMessage, onSentMessage)
+	hub := newHub(onPeerRegistered, onPeerUnregistered, onRecvMessage, onSentMessage)
 	defer hub.Shutdown()
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
@@ -147,21 +147,22 @@ func main() {
 	peerAddressEntry := widget.NewEntry()
 	peerAddressEntry.SetPlaceHolder("Peer IP / Connection String")
 
-	peerList := widget.NewList(
-		func() int { return len(fyneListPeers) },
+	chatList := widget.NewList(
+		func() int { return len(fyneChatList) },
 		func() fyne.CanvasObject {
 			return widget.NewLabel("")
 		},
 		func(lii widget.ListItemID, co fyne.CanvasObject) {
-			peerId := fyneListPeers[lii]
-			if peerId == uuid.Nil {
+			chatId := fyneChatList[lii]
+			slog.Warn("xxx", "chatId", chatId)
+			if chatId == uuid.Nil {
 				return
 			}
-			client, exist := hub.clients[peerId]
+			chat, exist := hub.chats[chatId]
 			if !exist {
-				log.Fatalf("not found client by selected peer id: %s", peerId)
+				log.Fatalf("chat not found: %s", chatId)
 			}
-			co.(*widget.Label).SetText(client.conn.RemoteAddr().String())
+			co.(*widget.Label).SetText(chat.id.String())
 		},
 	)
 
@@ -199,14 +200,17 @@ func main() {
 		go func() {
 			sentConnectRequests[peerAddress] = struct{}{}
 			defer func() { delete(sentConnectRequests, peerAddress) }()
-			client, err := ConnectToPeer(peerAddress, ourPeerId, privateKey)
+			// TODO or else take from connection string if was given by the server
+			// here we are generating a new chatId when connecting to someone,
+			// because we want the peer to create a new chat for our conversation
+			peer, err := ConnectToPeer(peerAddress, uuid.New(), ourPeerId, privateKey)
 			if err != nil {
 				NewModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas()).Show()
 				return
 			}
-			hub.RegisterClient(client)
+			hub.RegisterPeer(peer)
 			NewModalPopup(
-				fmt.Sprintf("Client %s connected!", client.conn.RemoteAddr()),
+				fmt.Sprintf("Client %s connected!", peer.conn.RemoteAddr()),
 				mainWindow.Canvas(),
 			).Show()
 		}()
@@ -218,21 +222,22 @@ func main() {
 		peerAddressEntry,
 		widget.NewButton("Connect", uiOnConnect),
 	)
-	removePeerBtn := widget.NewButton("Remove", func() {
-		removeClient := func(remove bool) {
+	rmChatBtn := widget.NewButton("Remove", func() {
+		rmChat := func(remove bool) {
 			if !remove {
 				return
 			}
-			if selectedPeerId == uuid.Nil {
+			if selectedChatId == uuid.Nil {
 				return
 			}
-			if err := hub.UnregisterClientByUUID(selectedPeerId); err != nil {
-				NewModalPopup(err.Error(), mainWindow.Canvas()).Show()
-			}
+			// TODO to be implemented
+			// if err := hub.UnregisterClientByUUID(selectedChatId); err != nil {
+			// 	NewModalPopup(err.Error(), mainWindow.Canvas()).Show()
+			// }
 		}
-		dialog.NewConfirm("Confirm", "Disconnect client?", removeClient, mainWindow).Show()
+		dialog.NewConfirm("Confirm", "Disconnect client?", rmChat, mainWindow).Show()
 	})
-	removePeerBtn.Disable()
+	rmChatBtn.Disable()
 	cpyConnStringBtn := widget.NewButton("Copy connection string", func() {
 		if err := clipboard.Init(); err != nil {
 			NewModalPopup("clipboard not available", mainWindow.Canvas()).Show()
@@ -245,7 +250,7 @@ func main() {
 	connContainer := container.NewBorder(
 		container.NewVBox(connEntry, cpyConnStringBtn),
 		nil, nil, nil,
-		container.NewBorder(nil, removePeerBtn, nil, nil, peerList),
+		container.NewBorder(nil, rmChatBtn, nil, nil, chatList),
 	)
 
 	textEntry := widget.NewEntry()
@@ -254,19 +259,20 @@ func main() {
 		if text == "" {
 			return
 		}
-		if selectedPeerId == uuid.Nil {
-			NewModalPopup("Select peer", mainWindow.Canvas()).Show()
+		if selectedChatId == uuid.Nil {
+			NewModalPopup("Select chat first", mainWindow.Canvas()).Show()
 			return
 		}
-		if _, exist := hub.clients[selectedPeerId]; !exist {
-			log.Fatalf("[ERROR] cur selected peer not found in hub: %s", selectedPeerId)
+		if _, exist := hub.chats[selectedChatId]; !exist {
+			log.Fatalf("selected chat not found in hub: %s", selectedChatId)
 		}
 		hub.sendMessage <- NewMsg(
 			text,
 			ourPeerId,
-			selectedPeerId,
-			hub.clients[selectedPeerId].conn.LocalAddr().String(),
-			hub.clients[selectedPeerId].conn.RemoteAddr().String(),
+			selectedChatId,
+			// TODO add something relevant later here
+			"",
+			"",
 		)
 		textEntry.SetText("")
 	}
@@ -297,40 +303,40 @@ func main() {
 	)
 	content.SetOffset(0.3)
 
-	peerList.OnSelected = func(id widget.ListItemID) {
-		peerId := fyneListPeers[id]
-		if peerId == uuid.Nil {
+	chatList.OnSelected = func(id widget.ListItemID) {
+		chatId := fyneChatList[id]
+		if chatId == uuid.Nil {
 			return
 		}
-		selectedPeerId = peerId
-		prevPeerGrid := curPeerTextGrid
-		if _, exist := peerTextGrids[selectedPeerId]; !exist {
-			peerTextGrids[selectedPeerId] = NewPeerTextGrid()
+		selectedChatId = chatId
+		prevChatGrid := curChatTextGrid
+		if _, exist := chatTextGrids[selectedChatId]; !exist {
+			chatTextGrids[selectedChatId] = NewChatTextGrid()
 		}
-		curPeerTextGrid = peerTextGrids[selectedPeerId]
-		if prevPeerGrid != nil {
-			prevPeerGrid.Hide()
+		curChatTextGrid = chatTextGrids[selectedChatId]
+		if prevChatGrid != nil {
+			prevChatGrid.Hide()
 		}
 		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
 		// because we still want to show it later when client is selected again
-		chatBorder.Objects[0] = curPeerTextGrid
-		curPeerTextGrid.Show()
+		chatBorder.Objects[0] = curChatTextGrid
+		curChatTextGrid.Show()
 		textEntry.Enable()
 		textEntryBtn.Enable()
-		removePeerBtn.Enable()
+		rmChatBtn.Enable()
 	}
 	// remove peer widgets from app window, disble control buttons
-	unselectPeer := func(peerId uuid.UUID) {
-		delete(peerTextGrids, peerId)
+	// TODO maybe it will help, but no use for now
+	_ = func(chatId uuid.UUID) {
+		delete(chatTextGrids, chatId)
 		// replace with placeholder to delete reference for current peer scroll from UI
 		chatBorder.Objects[0] = widget.NewTextGrid()
-		unregisteredSelectedPeer := peerId == selectedPeerId
-		if unregisteredSelectedPeer {
-			selectedPeerId = uuid.Nil
+		if chatId == selectedChatId {
+			selectedChatId = uuid.Nil
 			fyne.Do(func() {
 				textEntry.Disable()
 				textEntryBtn.Disable()
-				removePeerBtn.Disable()
+				rmChatBtn.Disable()
 			})
 		}
 	}
@@ -340,43 +346,36 @@ func main() {
 	go func() {
 		for {
 			select {
-			case client := <-onClientRegistered:
-				fyneListPeers = append(fyneListPeers, client.PeerId)
+			case peer := <-onPeerRegistered:
+				fyneChatList = append(fyneChatList, peer.ChatId)
 				fyne.Do(func() {
-					peerList.Refresh()
+					chatList.Refresh()
 				})
-				peerTextGrids[client.PeerId] = NewPeerTextGrid()
-			case client := <-onClientUnregistered:
-				deleteIdx := -1
-				for i, peerId := range fyneListPeers {
-					if peerId == client.PeerId {
-						deleteIdx = i
-						break
+				if _, exist := chatTextGrids[peer.ChatId]; !exist {
+					chatTextGrids[peer.ChatId] = NewChatTextGrid()
+				}
+			case peer := <-onPeerUnregistered:
+				chat, exist := hub.chats[peer.ChatId]
+				if exist {
+					if len(chat.peers) == 0 {
+						// TODO idk what to do, delete it or leave it empty?
 					}
 				}
-				clientFound := deleteIdx != -1
-				if clientFound {
-					fyneListPeers = append(fyneListPeers[:deleteIdx], fyneListPeers[deleteIdx+1:]...)
-					fyne.Do(func() {
-						peerList.Unselect(widget.ListItemID(deleteIdx))
-					})
-				}
-				unselectPeer(client.PeerId)
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
-					if grid, exist := peerTextGrids[msg.FromPeerId]; exist {
+					if grid, exist := chatTextGrids[msg.ToChatId]; exist {
 						grid.Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
 					} else {
-						log.Fatalf("error, no scroll peer found for %s", msg.FromPeerId)
+						log.Fatalf("error, no chat window found for %s", msg.ToChatId)
 					}
 				})
 			case msg := <-onSentMessage:
 				fyne.Do(func() {
-					if grid, exist := peerTextGrids[msg.ToPeerId]; exist {
+					if grid, exist := chatTextGrids[msg.ToChatId]; exist {
 						grid.Append(fmt.Sprintf("[me]: %s", msg.Txt))
 						grid.ScrollToBottom()
 					} else {
-						log.Fatalf("error, no scroll peer found for %s", msg.ToPeerAddr)
+						log.Fatalf("error, no chat window found for %s", msg.ToChatId)
 					}
 				})
 			}
