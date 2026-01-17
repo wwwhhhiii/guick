@@ -24,6 +24,8 @@ import (
 )
 
 // TODOS
+// - add chats
+// - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
 
