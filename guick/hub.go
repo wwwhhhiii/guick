@@ -86,15 +86,17 @@ func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte
 }
 
 type Chat struct {
-	mu    sync.RWMutex
-	id    uuid.UUID
-	peers map[uuid.UUID]*Peer
+	mu       sync.RWMutex
+	id       uuid.UUID
+	peers    map[uuid.UUID]*Peer
+	isHosted bool
 }
 
-func NewChat(id uuid.UUID) *Chat {
+func NewChat(id uuid.UUID, isHosted bool) *Chat {
 	return &Chat{
-		id:    id,
-		peers: make(map[uuid.UUID]*Peer, 100),
+		id:       id,
+		peers:    make(map[uuid.UUID]*Peer, 100),
+		isHosted: isHosted,
 	}
 }
 
@@ -193,23 +195,12 @@ func (hub *Hub) UnregisterClient(p *Peer) {
 	hub.unregister <- p
 }
 
-// shorthand for searching and removing client from hub by UUID.
-// returns error if client with such UUID is not found in hub
-// func (hub *Hub) UnregisterClientByUUID(clientUUID uuid.UUID) error {
-// 	client, exist := hub.LockedPeekClient(clientUUID)
-// 	if !exist {
-// 		return errors.New("client not registered")
-// 	}
-// 	hub.unregister <- client
-// 	return nil
-// }
-
-func (hub *Hub) getOrCreateChat(id uuid.UUID) *Chat {
+func (hub *Hub) getOrCreateChat(id uuid.UUID, isHosted bool) *Chat {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	chat, exist := hub.chats[id]
 	if !exist {
-		chat = NewChat(id)
+		chat = NewChat(id, isHosted)
 		hub.chats[chat.id] = chat
 	}
 	return chat
@@ -237,7 +228,8 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			hub.Shutdown()
 			return
 		case peer := <-hub.register:
-			chat := hub.getOrCreateChat(peer.ChatId)
+			chatIsHosted := peer.connType == TypeServer
+			chat := hub.getOrCreateChat(peer.ChatId, chatIsHosted)
 			chat.addPeers(peer)
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
 			pingStop := make(chan struct{})
@@ -279,6 +271,17 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 			hub.OnMsgSent <- msg
 		case msg := <-hub.recvMessage:
+			chat, exist := hub.chats[msg.ToChatId]
+			if !exist {
+				log.Fatal("broadcast message", "unknown chat id", msg.ToChatId)
+			}
+			// broadcas messages if is chat host
+			if chat.isHosted {
+				if err := chat.sendMessage(msg); err != nil {
+					slog.Error("broadcast message", "error", err)
+					continue
+				}
+			}
 			hub.OnMsgRecv <- msg
 		}
 	}
