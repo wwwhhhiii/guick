@@ -104,13 +104,11 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		slog.Error("peer info read", "error", err)
 		return
 	}
-	slog.Debug("xxx", "connecting peer encrypted data", encryptedData)
 	decryptedData, err := DecryptMessageData(encryptedData, aesgcm)
 	if err != nil {
 		slog.Error("peer message decrypt", "error", err)
 		return
 	}
-	slog.Debug("xxx", "connecting peer decrypted data", decryptedData)
 	jsonPeerData := &connectingPeerData{}
 	if err = json.Unmarshal(decryptedData, jsonPeerData); err != nil {
 		slog.Error("peer info unmarshal", "error", err)
@@ -207,7 +205,6 @@ func ConnectToPeer(
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("xxx", "connecting peer decrypted data", jsonPeerData)
 	encryptedMsg, err := EncryptMessage(jsonPeerData, aesgcm)
 	if err != nil {
 		return nil, err
@@ -216,7 +213,6 @@ func ConnectToPeer(
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("xxx", "connecting peer encrypted data", encryptedData)
 	err = conn.WriteMessage(websocket.BinaryMessage, encryptedData)
 	if err != nil {
 		slog.Error("peer info send", "error", err)
