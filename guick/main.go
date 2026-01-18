@@ -137,7 +137,7 @@ func main() {
 		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	slog.Info("running server", "address", serverAddr)
+	slog.Info("application is running", "address", serverAddr, "name", GenRandNickname())
 	go http.ListenAndServe(serverAddr, nil)
 
 	application = app.New()
@@ -154,7 +154,6 @@ func main() {
 		},
 		func(lii widget.ListItemID, co fyne.CanvasObject) {
 			chatId := fyneChatList[lii]
-			slog.Warn("xxx", "chatId", chatId)
 			if chatId == uuid.Nil {
 				return
 			}
@@ -347,7 +346,9 @@ func main() {
 		for {
 			select {
 			case peer := <-onPeerRegistered:
-				fyneChatList = append(fyneChatList, peer.ChatId)
+				if _, exist := chatTextGrids[peer.ChatId]; !exist {
+					fyneChatList = append(fyneChatList, peer.ChatId)
+				}
 				fyne.Do(func() {
 					chatList.Refresh()
 				})
