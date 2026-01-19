@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 )
 
-var adjectives = [1400]string{
+var adjectives = [...]string{
 	"abandoned", "able", "absolute", "adorable", "adventurous", "academic", "acceptable",
 	"acclaimed", "accomplished", "accurate", "aching", "acidic", "acrobatic", "active",
 	"actual", "adept", "admirable", "admired", "adolescent", "adorable", "adored",
@@ -186,7 +186,7 @@ var adjectives = [1400]string{
 	"wry", "yawning", "yearly", "yellow", "yellowish", "young", "youthful", "yummy", "zany",
 	"zealous", "zesty", "zigzag",
 }
-var nouns = [1530]string{
+var nouns = [...]string{
 	"people", "history", "way", "art", "world", "information", "map", "two", "family",
 	"government", "health", "system", "computer", "meat", "year", "thanks", "music", "person",
 	"reading", "method", "data", "food", "understanding", "theory", "law", "bird", "literature", "problem",
