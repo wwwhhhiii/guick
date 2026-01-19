@@ -68,21 +68,34 @@ func AesGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func EncryptMessage(plaintext []byte, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
+// encrypts provided data with aesgcm and new nonce
+// returns encrypted data, nonce and error
+func EncryptData(data []byte, aesgcm cipher.AEAD) ([]byte, []byte, error) {
 	nonce := make([]byte, aesgcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	ciphertext := aesgcm.Seal(nil, nonce, plaintext, nil)
-	return NewEncryptedMessage(ciphertext, nonce), nil
+	return aesgcm.Seal(nil, nonce, data, nil), nonce, nil
 }
 
-func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
-	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+func EncryptMessage(plaintext []byte, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
+	ciphertext, nonce, err := EncryptData(plaintext, aesgcm)
 	if err != nil {
 		return nil, err
 	}
-	return plaintext, nil
+	return NewEncryptedMessage(ciphertext, nonce), nil
+}
+
+func DecryptData(cipherdata []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
+	data, err := aesgcm.Open(nil, nonce, cipherdata, nil)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
+	return DecryptData(ciphertext, nonce, aesgcm)
 }
 
 type Chat struct {
