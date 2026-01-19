@@ -280,12 +280,18 @@ func main() {
 		}
 		chatId := uuid.New()
 		if selectedChatId != uuid.Nil {
-			// TODO very important to copy only if you are chat server, otherwise - error
+			chat, exist := hub.LockedPeekChat(selectedChatId)
+			if !exist {
+				panic("selected chat does not exist")
+			}
+			if !chat.isHosted {
+				NewModalPopup("you are not chat host", mainWindow.Canvas()).Show()
+				return
+			}
 			chatId = selectedChatId
 		}
 		encChatId := aesgcm.Seal(nil, nonce, chatId[:], nil)
 		b64chat := base64.StdEncoding.EncodeToString(encChatId)
-		slog.Warn("copy encrypted chat id", "hash", encChatId, "b64", b64chat, "origChatId", chatId)
 		condata, err := json.Marshal(&ConnectionCredentials{serverAddr, b64chat})
 		if err != nil {
 			slog.Error("connection data creation", "error", err)
