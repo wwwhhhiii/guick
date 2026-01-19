@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.design/x/clipboard"
+	"golang.org/x/crypto/hkdf"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -24,7 +28,10 @@ import (
 )
 
 // TODOS
-// - implement everything as a chat *in-progress
+// - implement everything as a chat *in-progress: implement connection string that contains encrypted chatId.
+// Connection can be either by plain chatId generated and provided by client
+// or by encrypted chatId hashed by server, then given to client and decrypted by server when client connects by it
+
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
@@ -107,8 +114,26 @@ func main() {
 	go hub.Run(interrupt)
 
 	// generate ecdh key-pair
+	// used to derive shared secret and then transient encryption key to communicate
+	// with each peer
 	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
+		panic(err)
+	}
+	// generate a persistent encryption key for encrypting/decrypting
+	// connection string
+	secret := RandSecret(32)
+	kd := hkdf.New(sha256.New, secret, nil, nil)
+	personalKey := make([]byte, 32)
+	if _, err := io.ReadFull(kd, personalKey); err != nil {
+		panic(err)
+	}
+	aesgcm, err := AesGCM(personalKey)
+	if err != nil {
+		panic(err)
+	}
+	nonce := make([]byte, aesgcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		panic(err)
 	}
 
@@ -134,6 +159,8 @@ func main() {
 		hub:           hub,
 		peerId:        ourPeerId,
 		privateKey:    privateKey,
+		aesgcm:        aesgcm,
+		nonce:         nonce,
 		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
@@ -169,13 +196,21 @@ func main() {
 		if peerAddressEntry.Text == "" {
 			return
 		}
-		var peerAddress string
+		connCreds := &ConnectionCredentials{}
 		// treat it as connection string first
 		conndata, err := base64.StdEncoding.DecodeString(peerAddressEntry.Text)
 		if err == nil {
-			peerAddress = string(conndata)
+			if err = json.Unmarshal(conndata, connCreds); err != nil {
+				NewModalPopup("invalid connection credentials format", mainWindow.Canvas()).Show()
+				return
+			}
+			b64ciper, err := base64.StdEncoding.DecodeString(connCreds.Cipherdata)
+			if err != nil {
+				panic(err)
+			}
+			slog.Warn("paste unmarshal cipherdata", "b64", connCreds.Cipherdata, "raw", b64ciper)
 		} else {
-			// if connection string parse failed
+			// if connection string parse failed - parse ipv4 address
 			host, port, err := net.SplitHostPort(peerAddressEntry.Text)
 			if err != nil {
 				NewModalPopup(fmt.Sprintf("invalid peer address: %s", err), mainWindow.Canvas()).Show()
@@ -185,25 +220,26 @@ func main() {
 				NewModalPopup("incorrect IP address format", mainWindow.Canvas()).Show()
 				return
 			}
-			peerAddress = net.JoinHostPort(host, port)
+			connCreds.ServerAddress = net.JoinHostPort(host, port)
+			// tell server-peer that we don't have a connection string and want a fresh chat
+			// by providing empty cipherdata
+			connCreds.Cipherdata = ""
 		}
 
-		if _, exist := localAddrs[peerAddress]; exist {
+		if _, exist := localAddrs[connCreds.ServerAddress]; exist {
 			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
 			return
 		}
-		if _, requestSent := sentConnectRequests[peerAddress]; requestSent {
+		if _, requestSent := sentConnectRequests[connCreds.ServerAddress]; requestSent {
 			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
 			return
 		}
 		go func() {
-			sentConnectRequests[peerAddress] = struct{}{}
-			defer func() { delete(sentConnectRequests, peerAddress) }()
-			// TODO or else take from connection string if was given by the server
-			// here we are generating a new chatId when connecting to someone,
-			// because we want the peer to create a new chat for our conversation
-			peer, err := ConnectToPeer(peerAddress, uuid.New(), ourPeerId, privateKey)
+			sentConnectRequests[connCreds.ServerAddress] = struct{}{}
+			defer func() { delete(sentConnectRequests, connCreds.ServerAddress) }()
+			peer, err := ConnectToPeer(ourPeerId, privateKey, connCreds)
 			if err != nil {
+				slog.Error("connect to server-peer", "error", err)
 				NewModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas()).Show()
 				return
 			}
@@ -242,7 +278,20 @@ func main() {
 			NewModalPopup("clipboard not available", mainWindow.Canvas()).Show()
 			return
 		}
-		condata := []byte(serverAddr)
+		chatId := uuid.New()
+		if selectedChatId != uuid.Nil {
+			// TODO very important to copy only if you are chat server, otherwise - error
+			chatId = selectedChatId
+		}
+		encChatId := aesgcm.Seal(nil, nonce, chatId[:], nil)
+		b64chat := base64.StdEncoding.EncodeToString(encChatId)
+		slog.Warn("copy encrypted chat id", "hash", encChatId, "b64", b64chat, "origChatId", chatId)
+		condata, err := json.Marshal(&ConnectionCredentials{serverAddr, b64chat})
+		if err != nil {
+			slog.Error("connection data creation", "error", err)
+			NewModalPopup("connection data creation error", mainWindow.Canvas()).Show()
+			return
+		}
 		clipboard.Write(clipboard.FmtText, []byte(base64.StdEncoding.EncodeToString(condata)))
 		NewModalPopup("copied to clipboard", mainWindow.Canvas()).Show()
 	})

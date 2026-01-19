@@ -323,8 +323,18 @@ var nouns = [...]string{
 	"yesterday",
 }
 
+const secretLetters = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()-=_+"
+
 func GenRandNickname() string {
 	var adj string = adjectives[rand.IntN(len(adjectives))]
 	var noun string = nouns[rand.IntN(len(nouns))]
 	return fmt.Sprintf("%s-%s", adj, noun)
+}
+
+func RandSecret(n uint64) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = secretLetters[rand.IntN(len(secretLetters))]
+	}
+	return b
 }
