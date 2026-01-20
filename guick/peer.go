@@ -29,6 +29,7 @@ type Peer struct {
 	// chat peer belongs to
 	ChatId uuid.UUID
 	PeerId uuid.UUID
+	Name   string
 	// peer connection
 	conn *websocket.Conn
 	// who is this peer: client or a server
@@ -37,10 +38,11 @@ type Peer struct {
 	aesgcm cipher.AEAD
 }
 
-func NewPeer(chatId uuid.UUID, peerId uuid.UUID, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Peer {
+func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Peer {
 	return &Peer{
 		ChatId:   chatId,
 		PeerId:   peerId,
+		Name:     name,
 		conn:     conn,
 		connType: connT,
 		aesgcm:   aesgcm,
@@ -126,8 +128,9 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 			out <- NewMsg(
 				string(decryptedData),
 				p.PeerId,
-				p.ChatId,
+				p.Name,
 				p.conn.RemoteAddr().String(),
+				p.ChatId,
 				p.conn.LocalAddr().String(),
 			)
 		}

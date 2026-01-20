@@ -27,11 +27,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// TODOS
-// - implement everything as a chat *in-progress: implement connection string that contains encrypted chatId.
-// Connection can be either by plain chatId generated and provided by client
-// or by encrypted chatId hashed by server, then given to client and decrypted by server when client connects by it
-
+// TODO:
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
@@ -155,16 +151,17 @@ func main() {
 		return acceptChan, closer
 	}
 
+	nickname := GenRandNickname()
 	wsHandler := &wsServeHandler{
 		hub:           hub,
-		peerId:        ourPeerId,
+		peerInfo:      &PeerInfo{ourPeerId, nickname},
 		privateKey:    privateKey,
 		aesgcm:        aesgcm,
 		nonce:         nonce,
 		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
-	slog.Info("application is running", "address", serverAddr, "name", GenRandNickname())
+	slog.Info("application is running", "address", serverAddr, "name", nickname)
 	go http.ListenAndServe(serverAddr, nil)
 
 	application = app.New()
@@ -237,7 +234,10 @@ func main() {
 		go func() {
 			sentConnectRequests[connCreds.ServerAddress] = struct{}{}
 			defer func() { delete(sentConnectRequests, connCreds.ServerAddress) }()
-			peer, err := ConnectToPeer(ourPeerId, privateKey, connCreds)
+			peer, err := ConnectToPeer(
+				privateKey,
+				&ConnectionInfo{PeerInfo{ourPeerId, nickname}, *connCreds},
+			)
 			if err != nil {
 				slog.Error("connect to server-peer", "error", err)
 				NewModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas()).Show()
@@ -323,10 +323,10 @@ func main() {
 		hub.sendMessage <- NewMsg(
 			text,
 			ourPeerId,
+			nickname,
+			"", // TODO out address
 			selectedChatId,
-			// TODO add something relevant later here
-			"",
-			"",
+			"", // TODO peer address
 		)
 		textEntry.SetText("")
 	}
@@ -420,7 +420,7 @@ func main() {
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
 					if grid, exist := chatTextGrids[msg.ToChatId]; exist {
-						grid.Append(fmt.Sprintf("[%s]: %s", msg.FromPeerAddr, msg.Txt))
+						grid.Append(fmt.Sprintf("[%s]: %s", msg.FromPeerName, msg.Txt))
 					} else {
 						log.Fatalf("error, no chat window found for %s", msg.ToChatId)
 					}

@@ -17,6 +17,7 @@ import (
 
 type Message struct {
 	FromPeerId   uuid.UUID
+	FromPeerName string
 	ToChatId     uuid.UUID
 	FromPeerAddr string
 	ToPeerAddr   string
@@ -26,15 +27,16 @@ type Message struct {
 func NewMsg(
 	txt string,
 	fromPeerId uuid.UUID,
-	toChatId uuid.UUID,
+	fromPeerName string,
 	fromPeerAddr string,
+	toChatId uuid.UUID,
 	toPeerAddr string,
 ) *Message {
 	return &Message{
 		Txt:          txt,
-		FromPeerId:   fromPeerId,
-		ToChatId:     toChatId,
+		FromPeerName: fromPeerName,
 		FromPeerAddr: fromPeerAddr,
+		ToChatId:     toChatId,
 		ToPeerAddr:   toPeerAddr,
 	}
 }

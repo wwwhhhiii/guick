@@ -20,6 +20,11 @@ import (
 
 var upgrader = websocket.Upgrader{}
 
+type PeerInfo struct {
+	Id   uuid.UUID `json:"Id"`
+	Name string    `json:"Name"`
+}
+
 // Provided to client-peers by server-peers.
 // Server address is the adress of server-peer that generated credentials and
 // where client-peer will be connecting to.
@@ -31,15 +36,15 @@ type ConnectionCredentials struct {
 }
 
 // peer that initiated the connection sends this data
-type connectionInfo struct {
-	PeerId      uuid.UUID             `json:"PeerId"`
-	Credentials ConnectionCredentials `json:"Credentials"`
+type ConnectionInfo struct {
+	Peer      PeerInfo              `json:"PeerInfo"`
+	ConnCreds ConnectionCredentials `json:"ConnCreds"`
 }
 
 type wsServeHandler struct {
 	hub        *Hub
 	privateKey *ecdh.PrivateKey
-	peerId     uuid.UUID
+	peerInfo   *PeerInfo
 	// used to decrypt credentials from connection string
 	// (implies that connection string was previously encrypted
 	// with same aesgcm and nonce and shared with peer)
@@ -66,7 +71,13 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peer, err := acceptPeerConnection(conn, wsh.privateKey, wsh.peerId, wsh.nonce, wsh.aesgcm)
+	peer, err := acceptPeerConnection(
+		conn,
+		wsh.privateKey,
+		wsh.peerInfo,
+		wsh.nonce,
+		wsh.aesgcm,
+	)
 	if err != nil {
 		slog.Error("connection accept", "error", err)
 		conn.WriteMessage(websocket.CloseInternalServerErr, nil)
@@ -80,7 +91,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 func acceptPeerConnection(
 	conn *websocket.Conn,
 	privateKey *ecdh.PrivateKey,
-	peerId uuid.UUID,
+	peerInfo *PeerInfo,
 	_nonce []byte,
 	_aesgcm cipher.AEAD,
 ) (*Peer, error) {
@@ -127,17 +138,17 @@ func acceptPeerConnection(
 	if err != nil {
 		return nil, err
 	}
-	clientInfo := &connectionInfo{}
+	clientInfo := &ConnectionInfo{}
 	if err = json.Unmarshal(decryptedData, clientInfo); err != nil {
 		return nil, err
 	}
-	if clientInfo.PeerId == peerId {
+	if clientInfo.Peer.Id == peerInfo.Id {
 		return nil, err
 	}
 	chatId := uuid.New()
-	if len(clientInfo.Credentials.Cipherdata) > 0 {
+	if len(clientInfo.ConnCreds.Cipherdata) > 0 {
 		// if server-peer generated connection string to existing chat
-		cipherdata, err := base64.StdEncoding.DecodeString(clientInfo.Credentials.Cipherdata)
+		cipherdata, err := base64.StdEncoding.DecodeString(clientInfo.ConnCreds.Cipherdata)
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +162,9 @@ func acceptPeerConnection(
 		}
 	}
 	// NOTE: credentials in server info are ignored
-	serverInfo, err := json.Marshal(&connectionInfo{ourPeerId, ConnectionCredentials{}})
+	serverInfo, err := json.Marshal(
+		&ConnectionInfo{*peerInfo, ConnectionCredentials{}},
+	)
 	encryptedMsg, err := EncryptMessage(serverInfo, aesgcm)
 	if err != nil {
 		return nil, err
@@ -160,18 +173,17 @@ func acceptPeerConnection(
 		return nil, err
 	}
 	// TODO type server is not needed here
-	peer := NewPeer(chatId, clientInfo.PeerId, conn, TypeServer, aesgcm)
+	peer := NewPeer(chatId, clientInfo.Peer.Id, clientInfo.Peer.Name, conn, TypeServer, aesgcm)
 	return peer, nil
 }
 
 // initiates connection with a server-peer
 func ConnectToPeer(
-	ourPeerId uuid.UUID,
 	privateKey *ecdh.PrivateKey,
-	connCreds *ConnectionCredentials,
+	connInfo *ConnectionInfo,
 ) (*Peer, error) {
-	url := url.URL{Scheme: "ws", Host: string(connCreds.ServerAddress), Path: "/ws"}
-	slog.Debug("connecting to peer", "addr", connCreds.ServerAddress)
+	url := url.URL{Scheme: "ws", Host: string(connInfo.ConnCreds.ServerAddress), Path: "/ws"}
+	slog.Debug("connecting to peer", "addr", connInfo.ConnCreds.ServerAddress)
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
 		if errors.Is(err, websocket.ErrBadHandshake) {
@@ -216,7 +228,7 @@ func ConnectToPeer(
 	}
 
 	// exchange app info
-	clientInfo, err := json.Marshal(&connectionInfo{ourPeerId, *connCreds})
+	clientInfo, err := json.Marshal(connInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -236,13 +248,20 @@ func ConnectToPeer(
 		return nil, err
 	}
 	// NOTE: credentials in server info are ignored
-	serverInfo := &connectionInfo{}
+	serverInfo := &ConnectionInfo{}
 	if err = json.Unmarshal(serverData, serverInfo); err != nil {
 		return nil, err
 	}
-	if serverInfo.PeerId == ourPeerId {
+	if serverInfo.Peer.Id == ourPeerId {
 		conn.Close()
 		return nil, errors.New("self connection")
 	}
-	return NewPeer(uuid.New(), serverInfo.PeerId, conn, TypeClient, aesgcm), nil
+	return NewPeer(
+		uuid.New(),
+		serverInfo.Peer.Id,
+		serverInfo.Peer.Name,
+		conn,
+		TypeClient,
+		aesgcm,
+	), nil
 }
