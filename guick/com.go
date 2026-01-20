@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/sha256"
 	"crypto/x509"
@@ -19,6 +18,36 @@ import (
 )
 
 var upgrader = websocket.Upgrader{}
+
+type Message struct {
+	FromPeerId   uuid.UUID
+	FromPeerName string
+	ToChatId     uuid.UUID
+	FromPeerAddr string
+	ToPeerAddr   string
+	Txt          string `json:"text"`
+}
+
+type EncryptedMessage struct {
+	Ciphertext []byte `json:"ciphertext"`
+}
+
+func EncryptMessage(plaintext []byte, key []byte) (*EncryptedMessage, error) {
+	ciphertext, err := Encrypt(plaintext, key)
+	if err != nil {
+		return nil, err
+	}
+	return &EncryptedMessage{Ciphertext: ciphertext}, nil
+}
+
+// decrypts structured peer message data into plaintext
+func DecryptMessageRaw(data []byte, key []byte) ([]byte, error) {
+	message := &EncryptedMessage{}
+	if err := json.Unmarshal(data, message); err != nil {
+		return nil, err
+	}
+	return Decrypt(message.Ciphertext, key)
+}
 
 type PeerInfo struct {
 	Id   uuid.UUID `json:"Id"`
@@ -45,11 +74,7 @@ type wsServeHandler struct {
 	hub        *Hub
 	privateKey *ecdh.PrivateKey
 	peerInfo   *PeerInfo
-	// used to decrypt credentials from connection string
-	// (implies that connection string was previously encrypted
-	// with same aesgcm and nonce and shared with peer)
-	aesgcm cipher.AEAD
-	nonce  []byte
+	_key       []byte
 	// hook incoming connection confirmation by user
 	requestAccept func(r *http.Request) (<-chan bool, func())
 }
@@ -75,8 +100,7 @@ func (wsh *wsServeHandler) serveWs(w http.ResponseWriter, r *http.Request) {
 		conn,
 		wsh.privateKey,
 		wsh.peerInfo,
-		wsh.nonce,
-		wsh.aesgcm,
+		wsh._key,
 	)
 	if err != nil {
 		slog.Error("connection accept", "error", err)
@@ -92,8 +116,7 @@ func acceptPeerConnection(
 	conn *websocket.Conn,
 	privateKey *ecdh.PrivateKey,
 	peerInfo *PeerInfo,
-	_nonce []byte,
-	_aesgcm cipher.AEAD,
+	_key []byte,
 ) (*Peer, error) {
 	// ecdh key exchange and encryption key derivation
 	_, data, err := conn.ReadMessage()
@@ -124,17 +147,13 @@ func acceptPeerConnection(
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
-	// aesgcm, err := AesGCM(encryptionKey)
-	// if err != nil {
-	// 	return nil, err
-	// }
 
 	// peer info exchange
 	_, clientInfoData, err := conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
-	decryptedData, err := DecryptMessageData(clientInfoData, encryptionKey)
+	decryptedData, err := DecryptMessageRaw(clientInfoData, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +171,7 @@ func acceptPeerConnection(
 		if err != nil {
 			return nil, err
 		}
-		credsData, err := DecryptData(cipherdata, _nonce, _aesgcm)
+		credsData, err := Decrypt(cipherdata, _key)
 		if err != nil {
 			return nil, err
 		}
@@ -229,10 +248,6 @@ func ConnectToPeer(
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
-	// aesgcm, err := AesGCM(encryptionKey)
-	// if err != nil {
-	// 	return nil, err
-	// }
 
 	// exchange app info
 	clientInfo, err := json.Marshal(connInfo)
@@ -250,7 +265,7 @@ func ConnectToPeer(
 	if err != nil {
 		return nil, err
 	}
-	serverData, err := DecryptMessageData(data, encryptionKey)
+	serverData, err := DecryptMessageRaw(data, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +274,7 @@ func ConnectToPeer(
 	if err = json.Unmarshal(serverData, serverInfo); err != nil {
 		return nil, err
 	}
-	if serverInfo.Peer.Id == ourPeerId {
+	if serverInfo.Peer.Id == connInfo.Peer.Id {
 		conn.Close()
 		return nil, errors.New("self connection")
 	}

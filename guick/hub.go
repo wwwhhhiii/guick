@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"encoding/json"
 	"errors"
 	"log"
 	"log/slog"
@@ -12,88 +9,6 @@ import (
 
 	"github.com/google/uuid"
 )
-
-type Message struct {
-	FromPeerId   uuid.UUID
-	FromPeerName string
-	ToChatId     uuid.UUID
-	FromPeerAddr string
-	ToPeerAddr   string
-	Txt          string `json:"text"`
-}
-
-func NewMsg(
-	txt string,
-	fromPeerId uuid.UUID,
-	fromPeerName string,
-	fromPeerAddr string,
-	toChatId uuid.UUID,
-	toPeerAddr string,
-) *Message {
-	return &Message{
-		Txt:          txt,
-		FromPeerId:   fromPeerId,
-		FromPeerName: fromPeerName,
-		FromPeerAddr: fromPeerAddr,
-		ToChatId:     toChatId,
-		ToPeerAddr:   toPeerAddr,
-	}
-}
-
-type EncryptedMessage struct {
-	Ciphertext []byte `json:"ciphertext"`
-	Nonce      []byte `json:"nonce"`
-}
-
-func NewEncryptedMessage(ciphertext []byte, nonce []byte) *EncryptedMessage {
-	return &EncryptedMessage{
-		Ciphertext: ciphertext,
-		Nonce:      nonce,
-	}
-}
-
-// decrypts structured peer message data into plaintext
-func DecryptMessageData(data []byte, key []byte) ([]byte, error) {
-	message := &EncryptedMessage{}
-	if err := json.Unmarshal(data, message); err != nil {
-		return nil, err
-	}
-	return DecryptMessage(message.Ciphertext, key)
-}
-
-func AesGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// encrypts provided data with aesgcm and new nonce
-// returns encrypted data, nonce and error
-func EncryptData(plaintext []byte, key []byte) ([]byte, error) {
-	return Encrypt(plaintext, key)
-}
-
-func EncryptMessage(plaintext []byte, key []byte) (*EncryptedMessage, error) {
-	ciphertext, err := EncryptData(plaintext, key)
-	if err != nil {
-		return nil, err
-	}
-	return NewEncryptedMessage(ciphertext, make([]byte, 0)), nil
-}
-
-func DecryptData(cipherdata []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
-	data, err := aesgcm.Open(nil, nonce, cipherdata, nil)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func DecryptMessage(ciphertext []byte, key []byte) ([]byte, error) {
-	return Decrypt(ciphertext, key)
-}
 
 type Chat struct {
 	mu       sync.RWMutex

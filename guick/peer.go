@@ -126,14 +126,13 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 				slog.Error("message data decrypt", "error", err)
 				continue
 			}
-			out <- NewMsg(
-				string(decryptedData),
-				p.PeerId,
-				p.Name,
-				p.conn.RemoteAddr().String(),
-				p.ChatId,
-				p.conn.LocalAddr().String(),
-			)
+			out <- &Message{
+				FromPeerId:   p.PeerId,
+				FromPeerName: p.Name,
+				FromPeerAddr: p.conn.RemoteAddr().String(),
+				ToChatId:     p.ChatId,
+				Txt:          string(decryptedData),
+			}
 		}
 	}()
 	return out

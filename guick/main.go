@@ -28,6 +28,7 @@ import (
 )
 
 // TODO:
+// - replace encrypted caht id with plain chat id and signed connection credentials
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
@@ -124,14 +125,6 @@ func main() {
 	if _, err := io.ReadFull(kd, personalKey); err != nil {
 		panic(err)
 	}
-	aesgcm, err := AesGCM(personalKey)
-	if err != nil {
-		panic(err)
-	}
-	nonce := make([]byte, aesgcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		panic(err)
-	}
 
 	var application fyne.App
 	var mainWindow fyne.Window
@@ -156,8 +149,7 @@ func main() {
 		hub:           hub,
 		peerInfo:      &PeerInfo{ourPeerId, nickname},
 		privateKey:    privateKey,
-		aesgcm:        aesgcm,
-		nonce:         nonce,
+		_key:          personalKey,
 		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
@@ -290,7 +282,12 @@ func main() {
 			}
 			chatId = selectedChatId
 		}
-		encChatId := aesgcm.Seal(nil, nonce, chatId[:], nil)
+		encChatId, err := Encrypt(chatId[:], personalKey)
+		if err != nil {
+			slog.Error("connection data creation", "error", err)
+			NewModalPopup("connection data creation error", mainWindow.Canvas()).Show()
+			return
+		}
 		b64chat := base64.StdEncoding.EncodeToString(encChatId)
 		condata, err := json.Marshal(&ConnectionCredentials{serverAddr, b64chat})
 		if err != nil {
@@ -320,14 +317,12 @@ func main() {
 		if _, exist := hub.chats[selectedChatId]; !exist {
 			log.Fatalf("selected chat not found in hub: %s", selectedChatId)
 		}
-		hub.sendMessage <- NewMsg(
-			text,
-			ourPeerId,
-			nickname,
-			"", // TODO out address
-			selectedChatId,
-			"", // TODO peer address
-		)
+		hub.sendMessage <- &Message{
+			FromPeerId:   ourPeerId,
+			FromPeerName: nickname,
+			ToChatId:     selectedChatId,
+			Txt:          text,
+		}
 		textEntry.SetText("")
 	}
 	textEntry.OnSubmitted = sendMessage
