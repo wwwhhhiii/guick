@@ -120,21 +120,21 @@ func acceptPeerConnection(
 		return nil, err
 	}
 	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
-	encryptionKey := make([]byte, 16) // AES-128
+	encryptionKey := make([]byte, 16) // AES-128 // TODO change to AES-256 (32 bytes)
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
-	aesgcm, err := AesGCM(encryptionKey)
-	if err != nil {
-		return nil, err
-	}
+	// aesgcm, err := AesGCM(encryptionKey)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// peer info exchange
 	_, clientInfoData, err := conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
-	decryptedData, err := DecryptMessageData(clientInfoData, aesgcm)
+	decryptedData, err := DecryptMessageData(clientInfoData, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func acceptPeerConnection(
 	serverInfo, err := json.Marshal(
 		&ConnectionInfo{*peerInfo, ConnectionCredentials{}},
 	)
-	encryptedMsg, err := EncryptMessage(serverInfo, aesgcm)
+	encryptedMsg, err := EncryptMessage(serverInfo, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,14 @@ func acceptPeerConnection(
 		return nil, err
 	}
 	// TODO type server is not needed here
-	peer := NewPeer(chatId, clientInfo.Peer.Id, clientInfo.Peer.Name, conn, TypeServer, aesgcm)
+	peer := NewPeer(
+		chatId,
+		clientInfo.Peer.Id,
+		clientInfo.Peer.Name,
+		conn,
+		TypeServer,
+		encryptionKey,
+	)
 	return peer, nil
 }
 
@@ -222,17 +229,17 @@ func ConnectToPeer(
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
-	aesgcm, err := AesGCM(encryptionKey)
-	if err != nil {
-		return nil, err
-	}
+	// aesgcm, err := AesGCM(encryptionKey)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// exchange app info
 	clientInfo, err := json.Marshal(connInfo)
 	if err != nil {
 		return nil, err
 	}
-	encryptedMsg, err := EncryptMessage(clientInfo, aesgcm)
+	encryptedMsg, err := EncryptMessage(clientInfo, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +250,7 @@ func ConnectToPeer(
 	if err != nil {
 		return nil, err
 	}
-	serverData, err := DecryptMessageData(data, aesgcm)
+	serverData, err := DecryptMessageData(data, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -262,6 +269,6 @@ func ConnectToPeer(
 		serverInfo.Peer.Name,
 		conn,
 		TypeClient,
-		aesgcm,
+		encryptionKey,
 	), nil
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/cipher"
 	"encoding/json"
 	"log/slog"
 	"time"
@@ -35,17 +34,19 @@ type Peer struct {
 	// who is this peer: client or a server
 	connType ConnType
 	// encryption block to communicate with peer
-	aesgcm cipher.AEAD
+	// aesgcm cipher.AEAD
+	key []byte
 }
 
-func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Conn, connT ConnType, aesgcm cipher.AEAD) *Peer {
+func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Conn, connT ConnType, key []byte) *Peer {
 	return &Peer{
 		ChatId:   chatId,
 		PeerId:   peerId,
 		Name:     name,
 		conn:     conn,
 		connType: connT,
-		aesgcm:   aesgcm,
+		key:      key,
+		// aesgcm:   aesgcm,
 	}
 }
 
@@ -58,7 +59,7 @@ func (p *Peer) GracefulDisconnect() error {
 
 // encrypts and writes message to underlying peer connection
 func (p *Peer) SendMessage(text string) error {
-	encryptedMessage, err := EncryptMessage([]byte(text), p.aesgcm)
+	encryptedMessage, err := EncryptMessage([]byte(text), p.key)
 	if err != nil {
 		return err
 	}
@@ -120,7 +121,7 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 				)
 				continue
 			}
-			decryptedData, err := DecryptMessageData(data, p.aesgcm)
+			decryptedData, err := DecryptMessageData(data, p.key)
 			if err != nil {
 				slog.Error("message data decrypt", "error", err)
 				continue

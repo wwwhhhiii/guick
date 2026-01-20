@@ -3,10 +3,8 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -34,6 +32,7 @@ func NewMsg(
 ) *Message {
 	return &Message{
 		Txt:          txt,
+		FromPeerId:   fromPeerId,
 		FromPeerName: fromPeerName,
 		FromPeerAddr: fromPeerAddr,
 		ToChatId:     toChatId,
@@ -54,12 +53,12 @@ func NewEncryptedMessage(ciphertext []byte, nonce []byte) *EncryptedMessage {
 }
 
 // decrypts structured peer message data into plaintext
-func DecryptMessageData(data []byte, aesgcm cipher.AEAD) ([]byte, error) {
+func DecryptMessageData(data []byte, key []byte) ([]byte, error) {
 	message := &EncryptedMessage{}
 	if err := json.Unmarshal(data, message); err != nil {
 		return nil, err
 	}
-	return DecryptMessage(message.Ciphertext, message.Nonce, aesgcm)
+	return DecryptMessage(message.Ciphertext, key)
 }
 
 func AesGCM(key []byte) (cipher.AEAD, error) {
@@ -72,20 +71,16 @@ func AesGCM(key []byte) (cipher.AEAD, error) {
 
 // encrypts provided data with aesgcm and new nonce
 // returns encrypted data, nonce and error
-func EncryptData(data []byte, aesgcm cipher.AEAD) ([]byte, []byte, error) {
-	nonce := make([]byte, aesgcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, nil, err
-	}
-	return aesgcm.Seal(nil, nonce, data, nil), nonce, nil
+func EncryptData(plaintext []byte, key []byte) ([]byte, error) {
+	return Encrypt(plaintext, key)
 }
 
-func EncryptMessage(plaintext []byte, aesgcm cipher.AEAD) (*EncryptedMessage, error) {
-	ciphertext, nonce, err := EncryptData(plaintext, aesgcm)
+func EncryptMessage(plaintext []byte, key []byte) (*EncryptedMessage, error) {
+	ciphertext, err := EncryptData(plaintext, key)
 	if err != nil {
 		return nil, err
 	}
-	return NewEncryptedMessage(ciphertext, nonce), nil
+	return NewEncryptedMessage(ciphertext, make([]byte, 0)), nil
 }
 
 func DecryptData(cipherdata []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
@@ -96,8 +91,8 @@ func DecryptData(cipherdata []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, e
 	return data, nil
 }
 
-func DecryptMessage(ciphertext []byte, nonce []byte, aesgcm cipher.AEAD) ([]byte, error) {
-	return DecryptData(ciphertext, nonce, aesgcm)
+func DecryptMessage(ciphertext []byte, key []byte) ([]byte, error) {
+	return Decrypt(ciphertext, key)
 }
 
 type Chat struct {
@@ -138,6 +133,7 @@ func (c *Chat) sendMessage(m *Message) error {
 		return errors.New("message mismatched chat id")
 	}
 	for id, peer := range c.peers {
+		slog.Warn("from peer id", "id", m.FromPeerId)
 		if id == m.FromPeerId {
 			continue
 		}
