@@ -3,12 +3,10 @@ package main
 import (
 	"crypto/ecdh"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -18,7 +16,6 @@ import (
 
 	"github.com/google/uuid"
 	"golang.design/x/clipboard"
-	"golang.org/x/crypto/hkdf"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -117,12 +114,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// generate a persistent encryption key for encrypting/decrypting
-	// connection string
-	secret := RandSecret(32)
-	kd := hkdf.New(sha256.New, secret, nil, nil)
-	personalKey := make([]byte, 32)
-	if _, err := io.ReadFull(kd, personalKey); err != nil {
+	// generate a persistent encryption key for signing server provided data
+	signKey, err := NewKey()
+	if err != nil {
 		panic(err)
 	}
 
@@ -149,7 +143,7 @@ func main() {
 		hub:           hub,
 		peerInfo:      &PeerInfo{ourPeerId, nickname},
 		privateKey:    privateKey,
-		_key:          personalKey,
+		_key:          signKey,
 		requestAccept: acceptConnection,
 	}
 	http.HandleFunc("/ws", wsHandler.serveWs)
@@ -193,11 +187,6 @@ func main() {
 				NewModalPopup("invalid connection credentials format", mainWindow.Canvas()).Show()
 				return
 			}
-			b64ciper, err := base64.StdEncoding.DecodeString(connCreds.Cipherdata)
-			if err != nil {
-				panic(err)
-			}
-			slog.Warn("paste unmarshal cipherdata", "b64", connCreds.Cipherdata, "raw", b64ciper)
 		} else {
 			// if connection string parse failed - parse ipv4 address
 			host, port, err := net.SplitHostPort(peerAddressEntry.Text)
@@ -282,7 +271,7 @@ func main() {
 			}
 			chatId = selectedChatId
 		}
-		encChatId, err := Encrypt(chatId[:], personalKey)
+		encChatId, err := Encrypt(chatId[:], signKey)
 		if err != nil {
 			slog.Error("connection data creation", "error", err)
 			NewModalPopup("connection data creation error", mainWindow.Canvas()).Show()

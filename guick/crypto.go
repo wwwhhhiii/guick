@@ -8,6 +8,15 @@ import (
 	"io"
 )
 
+// generates new 256 bit key
+func NewKey() ([]byte, error) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
 // encrypts plaintext with AES-GCM. returns ciphertext
 func Encrypt(plaintext []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
@@ -19,8 +28,6 @@ func Encrypt(plaintext []byte, key []byte) ([]byte, error) {
 		return nil, err
 	}
 	// TODO: ideally nonce shoudln't ever repeat, but it's ok to generate random for now.
-	// + new key is generated for each peer, so each individual peer connection can whistand
-	// around 4 bil. message encryptions
 	// Consider cahnging to counter implementation or something later
 	nonce := make([]byte, aesgcm.NonceSize())
 	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
