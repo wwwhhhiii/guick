@@ -121,7 +121,7 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 				)
 				continue
 			}
-			decryptedData, err := DecryptMessageData(data, p.key)
+			decryptedData, err := DecryptMessageRaw(data, p.key)
 			if err != nil {
 				slog.Error("message data decrypt", "error", err)
 				continue
