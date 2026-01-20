@@ -143,7 +143,7 @@ func acceptPeerConnection(
 		return nil, err
 	}
 	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
-	encryptionKey := make([]byte, 16) // AES-128 // TODO change to AES-256 (32 bytes)
+	encryptionKey := make([]byte, 32)
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
@@ -244,7 +244,7 @@ func ConnectToPeer(
 		return nil, err
 	}
 	hkdf := hkdf.New(sha256.New, sharedSecret, nil, nil)
-	encryptionKey := make([]byte, 16) // AES-128
+	encryptionKey := make([]byte, 32)
 	if _, err := io.ReadFull(hkdf, encryptionKey); err != nil {
 		return nil, err
 	}
