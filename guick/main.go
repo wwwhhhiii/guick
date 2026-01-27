@@ -25,9 +25,6 @@ import (
 )
 
 // TODO:
-// - broadcasted messages are shown as messages sent by chat host
-// - sign server data with sign key
-// - try to replace fyne with dearimgui
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
