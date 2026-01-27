@@ -28,27 +28,6 @@ type Message struct {
 	Txt          string `json:"text"`
 }
 
-type EncryptedMessage struct {
-	Ciphertext []byte `json:"ciphertext"`
-}
-
-func EncryptMessage(plaintext []byte, key []byte) (*EncryptedMessage, error) {
-	ciphertext, err := Encrypt(plaintext, key)
-	if err != nil {
-		return nil, err
-	}
-	return &EncryptedMessage{Ciphertext: ciphertext}, nil
-}
-
-// decrypts structured peer message data into plaintext
-func DecryptMessageRaw(data []byte, key []byte) ([]byte, error) {
-	message := &EncryptedMessage{}
-	if err := json.Unmarshal(data, message); err != nil {
-		return nil, err
-	}
-	return Decrypt(message.Ciphertext, key)
-}
-
 type PeerInfo struct {
 	Id   uuid.UUID `json:"Id"`
 	Name string    `json:"Name"`
@@ -153,7 +132,7 @@ func acceptPeerConnection(
 	if err != nil {
 		return nil, err
 	}
-	decryptedData, err := DecryptMessageRaw(clientInfoData, encryptionKey)
+	decryptedData, err := Decrypt(clientInfoData, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -184,11 +163,11 @@ func acceptPeerConnection(
 	serverInfo, err := json.Marshal(
 		&ConnectionInfo{*peerInfo, ConnectionCredentials{}},
 	)
-	encryptedMsg, err := EncryptMessage(serverInfo, encryptionKey)
+	encryptedData, err := Encrypt(serverInfo, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.WriteJSON(encryptedMsg); err != nil {
+	if err = conn.WriteMessage(websocket.BinaryMessage, encryptedData); err != nil {
 		return nil, err
 	}
 	// TODO type server is not needed here
@@ -254,18 +233,18 @@ func ConnectToPeer(
 	if err != nil {
 		return nil, err
 	}
-	encryptedMsg, err := EncryptMessage(clientInfo, encryptionKey)
+	encryptedData, err := Encrypt(clientInfo, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.WriteJSON(encryptedMsg); err != nil {
+	if err = conn.WriteMessage(websocket.TextMessage, encryptedData); err != nil {
 		return nil, err
 	}
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
-	serverData, err := DecryptMessageRaw(data, encryptionKey)
+	serverData, err := Decrypt(data, encryptionKey)
 	if err != nil {
 		return nil, err
 	}

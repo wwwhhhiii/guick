@@ -209,7 +209,6 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if !exist {
 				log.Fatal("broadcast message", "unknown chat id", msg.ToChatId)
 			}
-			// broadcas messages if is chat host
 			if chat.isHosted {
 				if err := chat.sendMessage(msg); err != nil {
 					slog.Error("broadcast message", "error", err)
