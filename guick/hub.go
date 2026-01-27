@@ -48,11 +48,10 @@ func (c *Chat) sendMessage(m *Message) error {
 		return errors.New("message mismatched chat id")
 	}
 	for id, peer := range c.peers {
-		slog.Warn("from peer id", "id", m.FromPeerId)
 		if id == m.FromPeerId {
 			continue
 		}
-		peer.SendMessage(m.Txt)
+		peer.SendMessage(m)
 	}
 	return nil
 }
@@ -65,6 +64,7 @@ type Hub struct {
 	register chan *Peer
 	// peer id to unregister and close connection to it
 	unregister chan *Peer
+	removeChat chan *Chat
 	// coming from peer
 	sendMessage chan *Message
 	// coming from goroutine listening to peer messages
@@ -93,6 +93,7 @@ func newHub(
 		chats:            make(map[uuid.UUID]*Chat, 100),
 		register:         make(chan *Peer),
 		unregister:       make(chan *Peer),
+		removeChat:       make(chan *Chat),
 		sendMessage:      make(chan *Message),
 		recvMessage:      make(chan *Message),
 		OnPeerRegister:   onClientReg,
@@ -135,7 +136,7 @@ func (hub *Hub) getOrCreateChat(id uuid.UUID, isHosted bool) *Chat {
 // closes connection with the peer.
 // deletes peer record from a chat.
 // emits peer unregistered event.
-func (hub *Hub) disconnectPeer(p *Peer) error {
+func (hub *Hub) gracefulDisconnectPeer(p *Peer) error {
 	if err := p.GracefulDisconnect(); err != nil {
 		p.conn.Close()
 	}
@@ -175,22 +176,29 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}()
 			hub.OnPeerRegister <- peer
 		case peer := <-hub.unregister:
-			// TODO mb chat.disconnectPeer?
-			if err := hub.disconnectPeer(peer); err != nil {
+			if err := hub.gracefulDisconnectPeer(peer); err != nil {
 				slog.Error("peer disconnect", "error", err)
 			}
-			// TODO remove chat if no peers left?
 			chat, exist := hub.LockedPeekChat(peer.ChatId)
 			if exist {
 				chat.rmPeers(peer)
 			}
 			hub.OnPeerUnregister <- peer
 			slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
+		case chat := <-hub.removeChat:
+			chat, exist := hub.chats[chat.id]
+			if !exist {
+				return
+			}
+			for _, peer := range chat.peers {
+				hub.gracefulDisconnectPeer(peer)
+			}
 		case msg := <-hub.sendMessage:
-			chat, exist := hub.chats[msg.ToChatId]
+			chat, exist := hub.LockedPeekChat(msg.ToChatId)
 			if !exist {
 				log.Fatal("send message", "unknown chat id", msg.ToChatId)
 			}
+			// TODO probably need buffered channel with goroutine to write messages
 			if err := chat.sendMessage(msg); err != nil {
 				slog.Error("send message", "error", err)
 				continue
@@ -218,7 +226,7 @@ func (hub *Hub) Shutdown() {
 	defer hub.mu.Unlock()
 	for _, chat := range hub.chats {
 		for _, peer := range chat.peers {
-			hub.disconnectPeer(peer)
+			hub.gracefulDisconnectPeer(peer)
 		}
 	}
 }

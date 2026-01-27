@@ -25,7 +25,9 @@ import (
 )
 
 // TODO:
-// - replace encrypted caht id with plain chat id and signed connection credentials
+// - broadcasted messages are shown as messages sent by chat host
+// - sign server data with sign key
+// - try to replace fyne with dearimgui
 // - add calls (audio, video, personal, group)
 // - add send of images and gifs
 // - add submit functionality for modal popup
@@ -246,10 +248,12 @@ func main() {
 			if selectedChatId == uuid.Nil {
 				return
 			}
-			// TODO to be implemented
-			// if err := hub.UnregisterClientByUUID(selectedChatId); err != nil {
-			// 	NewModalPopup(err.Error(), mainWindow.Canvas()).Show()
-			// }
+			chat, exist := hub.LockedPeekChat(selectedChatId)
+			if exist {
+				hub.removeChat <- chat
+			}
+			selectedChatId = uuid.Nil
+			// TODO remove chat from list
 		}
 		dialog.NewConfirm("Confirm", "Disconnect client?", rmChat, mainWindow).Show()
 	})

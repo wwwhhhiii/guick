@@ -58,17 +58,16 @@ func (p *Peer) GracefulDisconnect() error {
 }
 
 // encrypts and writes message to underlying peer connection
-func (p *Peer) SendMessage(text string) error {
-	encryptedMessage, err := EncryptMessage([]byte(text), p.key)
+func (p *Peer) SendMessage(m *Message) error {
+	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(encryptedMessage)
+	cipherdata, err := Encrypt(data, p.key)
 	if err != nil {
 		return err
 	}
-	// TODO: change message type to websocket.BinaryMessage
-	if err := p.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := p.conn.WriteMessage(websocket.BinaryMessage, cipherdata); err != nil {
 		return err
 	}
 	return nil
@@ -112,26 +111,31 @@ func (p *Peer) ReadMessagesGen() <-chan *Message {
 				slog.Error("peer connection read", "peerId", p.PeerId, "error", err)
 				break
 			}
-			if messageType != websocket.TextMessage {
+			if messageType != websocket.BinaryMessage {
 				slog.Error(
-					"received unexpected non-text message",
+					"received unexpected non-binary message",
 					"peerId", p.PeerId,
 					"messageType", messageType,
 					"message", data,
 				)
 				continue
 			}
-			decryptedData, err := DecryptMessageRaw(data, p.key)
+			msgData, err := Decrypt(data, p.key)
 			if err != nil {
 				slog.Error("message data decrypt", "error", err)
 				continue
 			}
+			m := &Message{}
+			if err = json.Unmarshal(msgData, m); err != nil {
+				slog.Error("message unmarshal", "error", err)
+				continue
+			}
 			out <- &Message{
 				FromPeerId:   p.PeerId,
-				FromPeerName: p.Name,
+				FromPeerName: m.FromPeerName,
 				FromPeerAddr: p.conn.RemoteAddr().String(),
 				ToChatId:     p.ChatId,
-				Txt:          string(decryptedData),
+				Txt:          m.Txt,
 			}
 		}
 	}()
