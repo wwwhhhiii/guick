@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -50,10 +51,12 @@ type ConnectionInfo struct {
 }
 
 type wsServeHandler struct {
-	hub        *Hub
+	hub *Hub
+	// to dervie pubkey for ecdh
 	privateKey *ecdh.PrivateKey
 	peerInfo   *PeerInfo
-	_key       []byte
+	// encrypt/decrypt connection string info
+	_key []byte
 	// hook incoming connection confirmation by user
 	requestAccept func(r *http.Request) (<-chan bool, func())
 }
@@ -189,6 +192,7 @@ func ConnectToPeer(
 ) (*Peer, error) {
 	url := url.URL{Scheme: "ws", Host: string(connInfo.ConnCreds.ServerAddress), Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", connInfo.ConnCreds.ServerAddress)
+	websocket.DefaultDialer.HandshakeTimeout = 60 * time.Second
 	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
 	if err != nil {
 		if errors.Is(err, websocket.ErrBadHandshake) {
