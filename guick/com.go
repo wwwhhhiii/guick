@@ -192,8 +192,12 @@ func ConnectToPeer(
 ) (*Peer, error) {
 	url := url.URL{Scheme: "ws", Host: string(connInfo.ConnCreds.ServerAddress), Path: "/ws"}
 	slog.Debug("connecting to peer", "addr", connInfo.ConnCreds.ServerAddress)
+	// TODO make general custom dialer
 	websocket.DefaultDialer.HandshakeTimeout = 60 * time.Second
-	conn, _, err := websocket.DefaultDialer.Dial(url.String(), nil)
+	header := make(http.Header, 1)
+	cookie := http.Cookie{Name: "nickname", Value: connInfo.Peer.Name}
+	header.Set("Cookie", cookie.String())
+	conn, _, err := websocket.DefaultDialer.Dial(url.String(), header)
 	if err != nil {
 		if errors.Is(err, websocket.ErrBadHandshake) {
 			return nil, errors.New("rejected by peer")

@@ -126,8 +126,15 @@ func main() {
 	// UI confirmation for incoming connections
 	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
 		acceptChan := make(chan bool)
+		displayName := r.RemoteAddr
+		cookies := r.Cookies()
+		if len(cookies) > 0 {
+			if cookies[0].Name == "nickname" {
+				displayName = cookies[0].Value
+			}
+		}
 		// accept chan awaits button press inside element
-		requestElement := NewPeerRequestElement(r.RemoteAddr, acceptChan)
+		requestElement := NewPeerRequestElement(displayName, acceptChan)
 		fyne.Do(func() { requestsContainer.Add(requestElement) })
 		fyne.Do(requestsContainer.Refresh)
 		closer := func() {
@@ -225,7 +232,7 @@ func main() {
 			}
 			hub.RegisterPeer(peer)
 			NewModalPopup(
-				fmt.Sprintf("Client %s connected!", peer.conn.RemoteAddr()),
+				fmt.Sprintf("Client %s connected!", peer.Name),
 				mainWindow.Canvas(),
 			).Show()
 		}()
