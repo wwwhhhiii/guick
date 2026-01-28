@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"time"
@@ -33,9 +34,9 @@ type Peer struct {
 	conn *websocket.Conn
 	// who is this peer: client or a server
 	connType ConnType
-	// encryption block to communicate with peer
-	// aesgcm cipher.AEAD
-	key []byte
+	cancel   context.CancelFunc
+	send     chan *Message
+	key      []byte
 }
 
 func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Conn, connT ConnType, key []byte) *Peer {
@@ -58,7 +59,7 @@ func (p *Peer) GracefulDisconnect() error {
 }
 
 // encrypts and writes message to underlying peer connection
-func (p *Peer) SendMessage(m *Message) error {
+func (p *Peer) sendMessage(m *Message) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -73,71 +74,64 @@ func (p *Peer) SendMessage(m *Message) error {
 	return nil
 }
 
-func StartConnPing(connection *websocket.Conn, pingInterval time.Duration, stop <-chan struct{}) {
-	connection.SetReadLimit(maxMessageSizeBytes)
-	connection.SetReadDeadline(time.Now().Add(pongWait))
-	connection.SetPongHandler(func(appData string) error {
-		connection.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
+func (p *Peer) startReader(ctx context.Context, readinto chan<- *Message) {
 	for {
 		select {
-		case <-ticker.C:
-			err := connection.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
-			if err != nil {
-				slog.Error("write ping message", "error", err)
-				return
-			}
-			slog.Debug("ping", "who", connection.RemoteAddr())
-		case <-stop:
+		case <-ctx.Done():
 			return
+		default:
+		}
+		mtype, data, err := p.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				// TODO somehow unregister peer on disconnect, mb use readinto to signal error?
+				p.GracefulDisconnect()
+				break
+			}
+			p.conn.Close()
+			break
+		}
+		if mtype != websocket.BinaryMessage {
+			continue
+		}
+		plaindata, err := Decrypt(data, p.key)
+		if err != nil {
+			continue
+		}
+		m := &Message{}
+		if err = json.Unmarshal(plaindata, m); err != nil {
+			continue
+		}
+		readinto <- &Message{
+			FromPeerId:   p.PeerId,
+			FromPeerName: m.FromPeerName,
+			FromPeerAddr: p.conn.RemoteAddr().String(),
+			ToChatId:     p.ChatId,
+			Txt:          m.Txt,
 		}
 	}
 }
 
-func (p *Peer) ReadMessagesGen() <-chan *Message {
-	out := make(chan *Message)
-	go func() {
-		defer close(out)
-		for {
-			messageType, data, err := p.conn.ReadMessage()
+func (p *Peer) startWriter(ctx context.Context) {
+	p.send = make(chan *Message, 100)
+	ticker := time.NewTicker(pingPeriod)
+	defer close(p.send)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-p.send:
+			if err := p.sendMessage(m); err != nil {
+				slog.Error("peer write message", "error", err)
+			}
+		case <-ticker.C:
+			err := p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
 			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-					slog.Info("connection closed by peer", "peerId", p.PeerId)
-					break
-				}
-				slog.Error("peer connection read", "peerId", p.PeerId, "error", err)
+				slog.Error("write ping message", "error", err)
 				break
 			}
-			if messageType != websocket.BinaryMessage {
-				slog.Error(
-					"received unexpected non-binary message",
-					"peerId", p.PeerId,
-					"messageType", messageType,
-					"message", data,
-				)
-				continue
-			}
-			msgData, err := Decrypt(data, p.key)
-			if err != nil {
-				slog.Error("message data decrypt", "error", err)
-				continue
-			}
-			m := &Message{}
-			if err = json.Unmarshal(msgData, m); err != nil {
-				slog.Error("message unmarshal", "error", err)
-				continue
-			}
-			out <- &Message{
-				FromPeerId:   p.PeerId,
-				FromPeerName: m.FromPeerName,
-				FromPeerAddr: p.conn.RemoteAddr().String(),
-				ToChatId:     p.ChatId,
-				Txt:          m.Txt,
-			}
+			slog.Debug("ping", "who", p.conn.RemoteAddr())
 		}
-	}()
-	return out
+	}
 }

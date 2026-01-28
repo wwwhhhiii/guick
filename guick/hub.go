@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -51,7 +53,7 @@ func (c *Chat) sendMessage(m *Message) error {
 		if id == m.FromPeerId {
 			continue
 		}
-		peer.SendMessage(m)
+		peer.send <- m
 	}
 	return nil
 }
@@ -71,16 +73,16 @@ type Hub struct {
 	recvMessage chan *Message
 	// Peers successfuly registered in hub are sent here.
 	// Use this to receive registred peers events
-	OnPeerRegister chan<- *Peer
+	PeerRegistered chan<- *Peer
 	// Sends peers that were unregistered in hub.
 	// Use this to receive registered peers events
-	OnPeerUnregister chan<- *Peer
+	PeerUnregistered chan<- *Peer
 	// Sends messages that were received from peers.
 	// Use this to receive messages from peers
-	OnMsgRecv chan<- *Message
+	MessageReceived chan<- *Message
 	// Sends messages that were sent to peer.
 	// Use this to receive messages that you sent
-	OnMsgSent chan<- *Message
+	MessageSent chan<- *Message
 }
 
 func newHub(
@@ -96,10 +98,10 @@ func newHub(
 		removeChat:       make(chan *Chat),
 		sendMessage:      make(chan *Message),
 		recvMessage:      make(chan *Message),
-		OnPeerRegister:   onClientReg,
-		OnPeerUnregister: onClientUnreg,
-		OnMsgRecv:        onMsgRecv,
-		OnMsgSent:        onMsgSent,
+		PeerRegistered:   onClientReg,
+		PeerUnregistered: onClientUnreg,
+		MessageReceived:  onMsgRecv,
+		MessageSent:      onMsgSent,
 	}
 }
 
@@ -159,22 +161,17 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			chat := hub.getOrCreateChat(peer.ChatId, chatIsHosted)
 			chat.addPeers(peer)
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
-			pingStop := make(chan struct{})
-			go StartConnPing(peer.conn, pingPeriod, pingStop)
-			go func() {
-				defer close(pingStop)
-				for msg := range peer.ReadMessagesGen() {
-					hub.recvMessage <- msg
-					// reading stops when peer connection is closed by peer or broken
-				}
-				pingStop <- struct{}{}
-				hub.closePeerConnection(peer)
-				slog.Info("closed peer connection", "peerId", peer.PeerId)
-				chat.rmPeers(peer)
-				slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
-				hub.OnPeerUnregister <- peer
-			}()
-			hub.OnPeerRegister <- peer
+			peer.conn.SetReadLimit(maxMessageSizeBytes)
+			peer.conn.SetReadDeadline(time.Now().Add(pongWait))
+			peer.conn.SetPongHandler(func(appData string) error {
+				peer.conn.SetReadDeadline(time.Now().Add(pongWait))
+				return nil
+			})
+			peerCtx, cancel := context.WithCancel(context.Background())
+			peer.cancel = cancel
+			go peer.startReader(peerCtx, hub.recvMessage)
+			go peer.startWriter(peerCtx)
+			hub.PeerRegistered <- peer
 		case peer := <-hub.unregister:
 			if err := hub.gracefulDisconnectPeer(peer); err != nil {
 				slog.Error("peer disconnect", "error", err)
@@ -182,8 +179,9 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			chat, exist := hub.LockedPeekChat(peer.ChatId)
 			if exist {
 				chat.rmPeers(peer)
+				peer.cancel()
 			}
-			hub.OnPeerUnregister <- peer
+			hub.PeerUnregistered <- peer
 			slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
 		case chat := <-hub.removeChat:
 			chat, exist := hub.chats[chat.id]
@@ -191,7 +189,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				return
 			}
 			for _, peer := range chat.peers {
+				peer.cancel()
 				hub.gracefulDisconnectPeer(peer)
+				// TODO collect peers first, call otside of for loop
+				chat.rmPeers(peer)
 			}
 		case msg := <-hub.sendMessage:
 			chat, exist := hub.LockedPeekChat(msg.ToChatId)
@@ -203,11 +204,11 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 				slog.Error("send message", "error", err)
 				continue
 			}
-			hub.OnMsgSent <- msg
+			hub.MessageSent <- msg
 		case msg := <-hub.recvMessage:
 			chat, exist := hub.chats[msg.ToChatId]
 			if !exist {
-				log.Fatal("broadcast message", "unknown chat id", msg.ToChatId)
+				log.Fatal("broadcast message unknown chat id ", msg.ToChatId)
 			}
 			if chat.isHosted {
 				if err := chat.sendMessage(msg); err != nil {
@@ -215,7 +216,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 					continue
 				}
 			}
-			hub.OnMsgRecv <- msg
+			hub.MessageReceived <- msg
 		}
 	}
 }
