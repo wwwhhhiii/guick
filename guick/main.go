@@ -25,9 +25,9 @@ import (
 )
 
 // TODO:
-// - add calls (audio, video, personal, group)
 // - add send of images and gifs
-// - add submit functionality for modal popup
+// - add calls (audio, video, personal, group)
+// - add headless mode
 
 var appHost = flag.String("host", "0.0.0.0", "http server host")
 var appPort = flag.String("port", "8080", "http server port")
@@ -256,10 +256,8 @@ func main() {
 			if exist {
 				hub.removeChat <- chat
 			}
-			selectedChatId = uuid.Nil
-			// TODO remove chat from list
 		}
-		dialog.NewConfirm("Confirm", "Disconnect client?", rmChat, mainWindow).Show()
+		dialog.NewConfirm("Confirm", "Remove chat?", rmChat, mainWindow).Show()
 	})
 	rmChatBtn.Disable()
 	cpyConnStringBtn := widget.NewButton("Copy connection string", func() {
@@ -371,9 +369,8 @@ func main() {
 		textEntryBtn.Enable()
 		rmChatBtn.Enable()
 	}
-	// remove peer widgets from app window, disble control buttons
-	// TODO maybe it will help, but no use for now
-	_ = func(chatId uuid.UUID) {
+	// remove chat widgets from app window, disble control buttons
+	unselectChat := func(chatId uuid.UUID) {
 		delete(chatTextGrids, chatId)
 		// replace with placeholder to delete reference for current peer scroll from UI
 		chatBorder.Objects[0] = widget.NewTextGrid()
@@ -383,6 +380,25 @@ func main() {
 				textEntry.Disable()
 				textEntryBtn.Disable()
 				rmChatBtn.Disable()
+			})
+		}
+
+	}
+	rmChatFromList := func(chatId uuid.UUID, chatList *[]uuid.UUID, chatListWdg *widget.List) {
+		deleteIdx := -1
+		for i, id := range *chatList {
+			if id == chatId {
+				deleteIdx = i
+				break
+			}
+		}
+		if deleteIdx != -1 {
+			slog.Debug("chat idx found", "idx", deleteIdx)
+			fmt.Println(chatList)
+			*chatList = append((*chatList)[:deleteIdx], (*chatList)[deleteIdx+1:]...)
+			fmt.Println(chatList)
+			fyne.Do(func() {
+				chatListWdg.Unselect(widget.ListItemID(deleteIdx))
 			})
 		}
 	}
@@ -409,6 +425,9 @@ func main() {
 						// TODO idk what to do, delete it or leave it empty?
 					}
 				}
+				rmChatFromList(chat.id, &fyneChatList, chatList)
+				fmt.Println()
+				unselectChat(chat.id)
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
 					if grid, exist := chatTextGrids[msg.ToChatId]; exist {

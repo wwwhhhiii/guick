@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -161,28 +160,11 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			chat := hub.getOrCreateChat(peer.ChatId, chatIsHosted)
 			chat.addPeers(peer)
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
-			peer.conn.SetReadLimit(maxMessageSizeBytes)
-			peer.conn.SetReadDeadline(time.Now().Add(pongWait))
-			peer.conn.SetPongHandler(func(appData string) error {
-				peer.conn.SetReadDeadline(time.Now().Add(pongWait))
-				return nil
-			})
 			peerCtx, cancel := context.WithCancel(context.Background())
 			peer.cancel = cancel
 			go peer.startReader(peerCtx, hub.recvMessage)
 			go peer.startWriter(peerCtx)
 			hub.PeerRegistered <- peer
-		case peer := <-hub.unregister:
-			if err := hub.gracefulDisconnectPeer(peer); err != nil {
-				slog.Error("peer disconnect", "error", err)
-			}
-			chat, exist := hub.LockedPeekChat(peer.ChatId)
-			if exist {
-				chat.rmPeers(peer)
-				peer.cancel()
-			}
-			hub.PeerUnregistered <- peer
-			slog.Info("peer removed from chat", "chatId", peer.ChatId, "peerId", peer.PeerId)
 		case chat := <-hub.removeChat:
 			chat, exist := hub.chats[chat.id]
 			if !exist {
@@ -190,9 +172,8 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			}
 			for _, peer := range chat.peers {
 				peer.cancel()
-				hub.gracefulDisconnectPeer(peer)
-				// TODO collect peers first, call otside of for loop
 				chat.rmPeers(peer)
+				hub.PeerUnregistered <- peer
 			}
 		case msg := <-hub.sendMessage:
 			chat, exist := hub.LockedPeekChat(msg.ToChatId)
