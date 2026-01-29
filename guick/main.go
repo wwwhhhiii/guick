@@ -393,10 +393,7 @@ func main() {
 			}
 		}
 		if deleteIdx != -1 {
-			slog.Debug("chat idx found", "idx", deleteIdx)
-			fmt.Println(chatList)
 			*chatList = append((*chatList)[:deleteIdx], (*chatList)[deleteIdx+1:]...)
-			fmt.Println(chatList)
 			fyne.Do(func() {
 				chatListWdg.Unselect(widget.ListItemID(deleteIdx))
 			})
@@ -426,7 +423,6 @@ func main() {
 					}
 				}
 				rmChatFromList(chat.id, &fyneChatList, chatList)
-				fmt.Println()
 				unselectChat(chat.id)
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
