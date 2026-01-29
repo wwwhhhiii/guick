@@ -68,6 +68,7 @@ func (p *Peer) sendMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	p.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	if err := p.conn.WriteMessage(websocket.BinaryMessage, cipherdata); err != nil {
 		return err
 	}
@@ -75,6 +76,15 @@ func (p *Peer) sendMessage(m *Message) error {
 }
 
 func (p *Peer) startReader(ctx context.Context, readinto chan<- *Message) {
+	defer func() {
+		p.conn.Close()
+	}()
+	p.conn.SetReadLimit(maxMessageSizeBytes)
+	p.conn.SetReadDeadline(time.Now().Add(pongWait))
+	p.conn.SetPongHandler(func(appData string) error {
+		p.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 	for {
 		select {
 		case <-ctx.Done():
@@ -117,6 +127,7 @@ func (p *Peer) startWriter(ctx context.Context) {
 	ticker := time.NewTicker(pingPeriod)
 	defer close(p.send)
 	defer ticker.Stop()
+	defer p.conn.Close()
 	for {
 		select {
 		case <-ctx.Done():
@@ -129,7 +140,7 @@ func (p *Peer) startWriter(ctx context.Context) {
 			err := p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
 			if err != nil {
 				slog.Error("write ping message", "error", err)
-				break
+				return
 			}
 			slog.Debug("ping", "who", p.conn.RemoteAddr())
 		}
