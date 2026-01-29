@@ -75,10 +75,11 @@ func (p *Peer) sendMessage(m *Message) error {
 	return nil
 }
 
-func (p *Peer) startReader(ctx context.Context, readinto chan<- *Message) {
+func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *Message) {
 	defer func() {
 		p.conn.Close()
 	}()
+	defer onStop()
 	p.conn.SetReadLimit(maxMessageSizeBytes)
 	p.conn.SetReadDeadline(time.Now().Add(pongWait))
 	p.conn.SetPongHandler(func(appData string) error {
@@ -94,7 +95,6 @@ func (p *Peer) startReader(ctx context.Context, readinto chan<- *Message) {
 		mtype, data, err := p.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				// TODO somehow unregister peer on disconnect, mb use readinto to signal error?
 				p.GracefulDisconnect()
 				break
 			}
@@ -122,12 +122,12 @@ func (p *Peer) startReader(ctx context.Context, readinto chan<- *Message) {
 	}
 }
 
-func (p *Peer) startWriter(ctx context.Context) {
+func (p *Peer) startWriter(ctx context.Context, onStop func()) {
 	p.send = make(chan *Message, 100)
 	ticker := time.NewTicker(pingPeriod)
 	defer close(p.send)
 	defer ticker.Stop()
-	defer p.conn.Close()
+	defer onStop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -135,6 +135,7 @@ func (p *Peer) startWriter(ctx context.Context) {
 		case m := <-p.send:
 			if err := p.sendMessage(m); err != nil {
 				slog.Error("peer write message", "error", err)
+				return
 			}
 		case <-ticker.C:
 			err := p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
