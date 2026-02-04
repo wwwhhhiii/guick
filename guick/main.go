@@ -409,21 +409,14 @@ func main() {
 				if _, exist := chatTextGrids[peer.ChatId]; !exist {
 					fyneChatList = append(fyneChatList, peer.ChatId)
 				}
-				fyne.Do(func() {
-					chatList.Refresh()
-				})
+				fyne.Do(chatList.Refresh)
 				if _, exist := chatTextGrids[peer.ChatId]; !exist {
 					chatTextGrids[peer.ChatId] = NewChatTextGrid()
 				}
-			case peer := <-onPeerUnregistered:
-				chat, exist := hub.chats[peer.ChatId]
-				if exist {
-					if len(chat.peers) == 0 {
-						// TODO idk what to do, delete it or leave it empty?
-					}
-				}
+			case chat := <-hub.ChatRemoved:
 				rmChatFromList(chat.id, &fyneChatList, chatList)
 				unselectChat(chat.id)
+				fyne.Do(chatList.Refresh)
 			case msg := <-onRecvMessage:
 				fyne.Do(func() {
 					if grid, exist := chatTextGrids[msg.ToChatId]; exist {

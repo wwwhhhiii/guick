@@ -53,7 +53,7 @@ func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Co
 }
 
 // gracefully closes peer connection
-func (p *Peer) GracefulDisconnect() error {
+func (p *Peer) SendDisconnect() error {
 	return p.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
 		websocket.CloseNormalClosure, ""),
 	)
@@ -77,9 +77,7 @@ func (p *Peer) sendMessage(m *Message) error {
 }
 
 func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *Message) {
-	defer func() {
-		p.conn.Close()
-	}()
+	defer func() { p.conn.Close() }()
 	defer onStop()
 	p.conn.SetReadLimit(maxMessageSizeBytes)
 	p.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -95,11 +93,6 @@ func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *
 		}
 		mtype, data, err := p.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				p.GracefulDisconnect()
-				break
-			}
-			p.conn.Close()
 			break
 		}
 		if mtype != websocket.BinaryMessage {
@@ -131,6 +124,7 @@ func (p *Peer) startWriter(ctx context.Context, onStop func()) {
 	for {
 		select {
 		case <-ctx.Done():
+			p.SendDisconnect()
 			return
 		case m := <-p.send:
 			if err := p.sendMessage(m); err != nil {

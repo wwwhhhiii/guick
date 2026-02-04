@@ -70,6 +70,7 @@ type Hub struct {
 	sendMessage chan *Message
 	// coming from goroutine listening to peer messages
 	recvMessage chan *Message
+	ChatRemoved chan *Chat
 	// Peers successfuly registered in hub are sent here.
 	// Use this to receive registred peers events
 	PeerRegistered chan<- *Peer
@@ -97,6 +98,7 @@ func newHub(
 		removeChat:       make(chan *Chat),
 		sendMessage:      make(chan *Message, 100),
 		recvMessage:      make(chan *Message, 100),
+		ChatRemoved:      make(chan *Chat, 100),
 		PeerRegistered:   onClientReg,
 		PeerUnregistered: onClientUnreg,
 		MessageReceived:  onMsgRecv,
@@ -138,7 +140,7 @@ func (hub *Hub) getOrCreateChat(id uuid.UUID, isHosted bool) *Chat {
 // deletes peer record from a chat.
 // emits peer unregistered event.
 func (hub *Hub) gracefulDisconnectPeer(p *Peer) error {
-	if err := p.GracefulDisconnect(); err != nil {
+	if err := p.SendDisconnect(); err != nil {
 		p.conn.Close()
 	}
 	return nil
@@ -179,8 +181,8 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			for _, peer := range chat.peers {
 				peer.cancel()
 				chat.rmPeers(peer)
-				hub.PeerUnregistered <- peer
 			}
+			hub.ChatRemoved <- chat
 		case msg := <-hub.sendMessage:
 			chat, exist := hub.LockedPeekChat(msg.ToChatId)
 			if !exist {
