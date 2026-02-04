@@ -164,8 +164,16 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
 			peerCtx, cancel := context.WithCancel(context.Background())
 			peer.cancel = cancel
-			go peer.startReader(peerCtx, func() { hub.unregister <- peer }, hub.recvMessage)
-			go peer.startWriter(peerCtx, func() { hub.unregister <- peer })
+			cleanup := func() {
+				peer.conn.Close()
+				if chat.isHosted {
+					chat.rmPeers(peer)
+				} else {
+					hub.removeChat <- chat
+				}
+			}
+			go peer.startReader(peerCtx, cleanup, hub.recvMessage)
+			go peer.startWriter(peerCtx, cleanup)
 			hub.PeerRegistered <- peer
 		case peer := <-hub.unregister:
 			peer.conn.Close()
