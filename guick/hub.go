@@ -136,6 +136,17 @@ func (hub *Hub) getOrCreateChat(id uuid.UUID, isHosted bool) *Chat {
 	return chat
 }
 
+// call only from hub goroutine
+func (h *Hub) rmChat(c *Chat) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, exist := h.chats[c.id]; !exist {
+		return errors.New("chat does not exist")
+	}
+	delete(h.chats, c.id)
+	return nil
+}
+
 // closes connection with the peer.
 // deletes peer record from a chat.
 // emits peer unregistered event.
@@ -164,39 +175,30 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
 			peerCtx, cancel := context.WithCancel(context.Background())
 			peer.cancel = cancel
-			cleanup := func() {
-				peer.conn.Close()
-				if chat.isHosted {
-					chat.rmPeers(peer)
-				} else {
-					hub.removeChat <- chat
-				}
+			cleanup := func() { hub.removeChat <- chat }
+			if chat.isHosted {
+				cleanup = func() { hub.unregister <- peer }
 			}
 			go peer.startReader(peerCtx, cleanup, hub.recvMessage)
 			go peer.startWriter(peerCtx, cleanup)
 			hub.PeerRegistered <- peer
 		case peer := <-hub.unregister:
-			peer.conn.Close()
 			chat, exist := hub.LockedPeekChat(peer.ChatId)
 			if exist {
 				chat.rmPeers(peer)
 			}
 		case chat := <-hub.removeChat:
-			chat, exist := hub.chats[chat.id]
-			if !exist {
-				return
-			}
 			for _, peer := range chat.peers {
 				peer.cancel()
-				chat.rmPeers(peer)
 			}
-			hub.ChatRemoved <- chat
+			if err := hub.rmChat(chat); err == nil {
+				hub.ChatRemoved <- chat
+			}
 		case msg := <-hub.sendMessage:
 			chat, exist := hub.LockedPeekChat(msg.ToChatId)
 			if !exist {
 				log.Fatal("send message", "unknown chat id", msg.ToChatId)
 			}
-			// TODO probably need buffered channel with goroutine to write messages
 			if err := chat.sendMessage(msg); err != nil {
 				slog.Error("send message", "error", err)
 				continue
