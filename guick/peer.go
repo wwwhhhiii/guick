@@ -45,6 +45,7 @@ func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Co
 		PeerId:   peerId,
 		Name:     name,
 		conn:     conn,
+		send:     make(chan *Message, 100),
 		connType: connT,
 		key:      key,
 		// aesgcm:   aesgcm,
@@ -123,7 +124,6 @@ func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *
 }
 
 func (p *Peer) startWriter(ctx context.Context, onStop func()) {
-	p.send = make(chan *Message, 100)
 	ticker := time.NewTicker(pingPeriod)
 	defer close(p.send)
 	defer ticker.Stop()
