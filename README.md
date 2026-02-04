@@ -1,1 +1,1 @@
-# guick
+A peer-to-peer messenger with transient chats and end-to-end encryption
