@@ -24,10 +24,11 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// TODO:
-// - add send of images and gifs
-// - add calls (audio, video, personal, group)
-// - add headless mode
+// BUG client will create many instances of the same chat if connecting to the same server
+
+// TODO add send of images and gifs
+// TODO add calls (audio, video, personal, group)
+// TODO add headless mode
 
 var appHost = flag.String("host", "0.0.0.0", "http server host")
 var appPort = flag.String("port", "8080", "http server port")

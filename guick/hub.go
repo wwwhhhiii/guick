@@ -175,8 +175,10 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			slog.Info("peer added to chat", "chatId", chat.id, "peerId", peer.PeerId)
 			peerCtx, cancel := context.WithCancel(context.Background())
 			peer.cancel = cancel
+			// remove chat if was host-peer disconnected
 			cleanup := func() { hub.removeChat <- chat }
 			if chat.isHosted {
+				// remove peer from chat if peer connection error occur
 				cleanup = func() { hub.unregister <- peer }
 			}
 			go peer.startReader(peerCtx, cleanup, hub.recvMessage)
@@ -186,6 +188,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			chat, exist := hub.LockedPeekChat(peer.ChatId)
 			if exist {
 				chat.rmPeers(peer)
+				slog.Info("peer removed", "chatId", chat.id, "peerId", peer.PeerId)
 			}
 		case chat := <-hub.removeChat:
 			for _, peer := range chat.peers {
@@ -194,6 +197,7 @@ func (hub *Hub) Run(interrupt <-chan os.Signal) {
 			if err := hub.rmChat(chat); err == nil {
 				hub.ChatRemoved <- chat
 			}
+			slog.Info("chat removed", "chatId", chat.id)
 		case msg := <-hub.sendMessage:
 			chat, exist := hub.LockedPeekChat(msg.ToChatId)
 			if !exist {

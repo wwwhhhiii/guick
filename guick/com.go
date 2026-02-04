@@ -261,10 +261,6 @@ func ConnectToPeer(
 	if err = json.Unmarshal(serverData, serverInfo); err != nil {
 		return nil, err
 	}
-	if serverInfo.Peer.Id == connInfo.Peer.Id {
-		conn.Close()
-		return nil, errors.New("self connection")
-	}
 	return NewPeer(
 		uuid.New(),
 		serverInfo.Peer.Id,
