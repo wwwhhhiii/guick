@@ -2,6 +2,7 @@ package main
 
 import (
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
@@ -34,4 +35,30 @@ func NewChatTextGrid() *widget.TextGrid {
 	textGrid := widget.NewTextGrid()
 	textGrid.Scroll = fyne.ScrollBoth
 	return textGrid
+}
+
+type ChatWdg struct {
+	widget.BaseWidget
+	container *fyne.Container
+}
+
+func NewChatWdg() *ChatWdg {
+	return &ChatWdg{}
+}
+
+func (c *ChatWdg) CreateRenderer() fyne.WidgetRenderer {
+	container := container.NewStack()
+	return widget.NewSimpleRenderer(container)
+}
+
+func (c *ChatWdg) RecvText(s *string) error {
+	return nil
+}
+
+func (c *ChatWdg) SendText(s string) {
+	c.container.Add(canvas.NewText(s, nil))
+}
+
+func (c *ChatWdg) SendImg(img *canvas.Image) {
+
 }

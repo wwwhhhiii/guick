@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image/color"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -19,13 +22,16 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 )
 
 // BUG client will create many instances of the same chat if connecting to the same server
 
+// TODO change constant addition of border containers to two VBoxes for each peer
 // TODO add send of images and gifs
 // TODO add calls (audio, video, personal, group)
 // TODO add headless mode
@@ -42,13 +48,13 @@ var ourPeerId = uuid.New()
 var selectedChatId = uuid.Nil
 
 // current chat text grid to show and append sent/recv messages to
-var curChatTextGrid *widget.TextGrid = nil
+var curChatContainer *fyne.Container = nil
 
 // a slice just for conversion between fyne list id to app chat UUID
 var fyneChatList = []uuid.UUID{}
 
 // chat containers to select from when selecting current chat in UI
-var chatTextGrids = make(map[uuid.UUID]*widget.TextGrid)
+var chatsMap = make(map[uuid.UUID]*fyne.Container)
 
 var sentConnectRequests = make(map[string]struct{})
 
@@ -317,7 +323,8 @@ func main() {
 			FromPeerId:   ourPeerId,
 			FromPeerName: nickname,
 			ToChatId:     selectedChatId,
-			Txt:          text,
+			Type:         TypeText,
+			Data:         []byte(text),
 		}
 		textEntry.SetText("")
 	}
@@ -328,11 +335,32 @@ func main() {
 		}
 		sendMessage(textEntry.Text)
 	})
+	clipFileBtn := widget.NewButton("📎", func() {
+		onSelect := func(r fyne.URIReadCloser, err error) {
+			if r == nil {
+				return
+			}
+			data, err := io.ReadAll(r)
+			if err != nil {
+				// TODO some notification if file cant be processed
+				return
+			}
+			hub.sendMessage <- &Message{
+				FromPeerId:   ourPeerId,
+				FromPeerName: nickname,
+				ToChatId:     selectedChatId,
+				Type:         TypeImg,
+				Data:         data,
+			}
+		}
+		dialog.NewFileOpen(onSelect, mainWindow).Show()
+	})
 	textEntry.Disable()
 	textEntryBtn.Disable()
+	clipFileBtn.Disable()
 	textSendEntry := container.NewVBox(
 		textEntry,
-		textEntryBtn,
+		container.NewBorder(nil, nil, clipFileBtn, nil, textEntryBtn),
 	)
 	placeholderTextGrid := widget.NewTextGrid()
 	chatBorder := container.NewBorder(
@@ -354,25 +382,26 @@ func main() {
 			return
 		}
 		selectedChatId = chatId
-		prevChatGrid := curChatTextGrid
-		if _, exist := chatTextGrids[selectedChatId]; !exist {
-			chatTextGrids[selectedChatId] = NewChatTextGrid()
+		prevChatGrid := curChatContainer
+		if _, exist := chatsMap[selectedChatId]; !exist {
+			chatsMap[selectedChatId] = container.NewVBox() // NewChatTextGrid()
 		}
-		curChatTextGrid = chatTextGrids[selectedChatId]
+		curChatContainer = chatsMap[selectedChatId]
 		if prevChatGrid != nil {
 			prevChatGrid.Hide()
 		}
 		// Here we reassigning inner object of chat, but keep reference to it in peers scroll map
 		// because we still want to show it later when client is selected again
-		chatBorder.Objects[0] = curChatTextGrid
-		curChatTextGrid.Show()
+		chatBorder.Objects[0] = curChatContainer
+		curChatContainer.Show()
 		textEntry.Enable()
 		textEntryBtn.Enable()
+		clipFileBtn.Enable()
 		rmChatBtn.Enable()
 	}
 	// remove chat widgets from app window, disble control buttons
 	unselectChat := func(chatId uuid.UUID) {
-		delete(chatTextGrids, chatId)
+		delete(chatsMap, chatId)
 		// replace with placeholder to delete reference for current peer scroll from UI
 		chatBorder.Objects[0] = widget.NewTextGrid()
 		if chatId == selectedChatId {
@@ -380,6 +409,7 @@ func main() {
 			fyne.Do(func() {
 				textEntry.Disable()
 				textEntryBtn.Disable()
+				clipFileBtn.Disable()
 				rmChatBtn.Disable()
 			})
 		}
@@ -401,40 +431,88 @@ func main() {
 		}
 	}
 
+	shiftCtrlV := &desktop.CustomShortcut{
+		KeyName:  fyne.KeyV,
+		Modifier: fyne.KeyModifierShift | fyne.KeyModifierControl,
+	}
+	mainWindow.Canvas().AddShortcut(shiftCtrlV, func(shortcut fyne.Shortcut) {
+		if err := clipboard.Init(); err != nil {
+			slog.Error("clipboard not available")
+			return
+		}
+		data := clipboard.Read(clipboard.FmtImage)
+		hub.sendMessage <- &Message{
+			FromPeerId:   ourPeerId,
+			FromPeerName: nickname,
+			ToChatId:     selectedChatId,
+			Type:         TypeImg,
+			Data:         data,
+		}
+	})
+
 	// a UI reactor
 	// essentially reads events from hub channels and updates relevant UI components
 	go func() {
 		for {
 			select {
 			case peer := <-onPeerRegistered:
-				if _, exist := chatTextGrids[peer.ChatId]; !exist {
+				if _, exist := chatsMap[peer.ChatId]; !exist {
 					fyneChatList = append(fyneChatList, peer.ChatId)
 				}
 				fyne.Do(chatList.Refresh)
-				if _, exist := chatTextGrids[peer.ChatId]; !exist {
-					chatTextGrids[peer.ChatId] = NewChatTextGrid()
+				if _, exist := chatsMap[peer.ChatId]; !exist {
+					chatsMap[peer.ChatId] = container.NewVBox()
 				}
 			case chat := <-hub.ChatRemoved:
 				rmChatFromList(chat.id, &fyneChatList, chatList)
 				unselectChat(chat.id)
 				fyne.Do(chatList.Refresh)
 			case msg := <-onRecvMessage:
-				fyne.Do(func() {
-					if grid, exist := chatTextGrids[msg.ToChatId]; exist {
-						grid.Append(fmt.Sprintf("[%s]: %s", msg.FromPeerName, msg.Txt))
-					} else {
-						log.Fatalf("error, no chat window found for %s", msg.ToChatId)
-					}
-				})
+				chat, exist := chatsMap[msg.ToChatId]
+				if !exist {
+					log.Fatalf("error, no chat window found for %s", msg.ToChatId)
+				}
+				switch msg.Type {
+				case TypeText:
+					m := fmt.Sprintf("[%s]: %s", msg.FromPeerName, msg.Data)
+					t := canvas.NewText(m, color.White)
+					fyne.Do(func() {
+						chat.Add(container.NewBorder(nil, nil, t, nil))
+						chat.Refresh()
+					})
+				case TypeImg:
+					// read image
+					img := canvas.NewImageFromReader(bytes.NewReader(msg.Data), uuid.New().String())
+					img.FillMode = canvas.ImageFillOriginal
+					m := fmt.Sprintf("[%s]:", msg.FromPeerName)
+					t := canvas.NewText(m, color.White)
+					fyne.Do(func() {
+						chat.Add(container.NewBorder(nil, nil, t, nil))
+						chat.Add(container.NewBorder(nil, nil, img, nil))
+						chat.Refresh()
+					})
+				}
 			case msg := <-onSentMessage:
-				fyne.Do(func() {
-					if grid, exist := chatTextGrids[msg.ToChatId]; exist {
-						grid.Append(fmt.Sprintf("[me]: %s", msg.Txt))
-						grid.ScrollToBottom()
-					} else {
-						log.Fatalf("error, no chat window found for %s", msg.ToChatId)
-					}
-				})
+				chat, exist := chatsMap[msg.ToChatId]
+				if !exist {
+					log.Fatalf("error, no chat window found for %s", msg.ToChatId)
+				}
+				switch msg.Type {
+				case TypeText:
+					m := fmt.Sprintf("%s  ", msg.Data)
+					t := canvas.NewText(m, color.White)
+					fyne.Do(func() {
+						chat.Add(container.NewBorder(nil, nil, nil, t))
+						chat.Refresh()
+					})
+				case TypeImg:
+					img := canvas.NewImageFromReader(bytes.NewReader(msg.Data), uuid.New().String())
+					img.FillMode = canvas.ImageFillOriginal
+					fyne.Do(func() {
+						chat.Add(container.NewBorder(nil, nil, nil, img))
+						chat.Refresh()
+					})
+				}
 			}
 		}
 	}()

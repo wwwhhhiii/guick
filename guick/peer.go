@@ -18,7 +18,7 @@ const (
 )
 
 const (
-	maxMessageSizeBytes = 512
+	maxMessageSizeBytes = 100 * 1024 * 1024
 
 	pongWait   = 60 * time.Second
 	pingPeriod = (pongWait * 9) / 10
@@ -93,6 +93,7 @@ func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *
 		}
 		mtype, data, err := p.conn.ReadMessage()
 		if err != nil {
+			slog.Error("message read", "error", err)
 			break
 		}
 		if mtype != websocket.BinaryMessage {
@@ -100,10 +101,12 @@ func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *
 		}
 		plaindata, err := Decrypt(data, p.key)
 		if err != nil {
+			slog.Error("message read decrypt", "error", err)
 			continue
 		}
 		m := &Message{}
 		if err = json.Unmarshal(plaindata, m); err != nil {
+			slog.Error("message read unmarshal", "error", err)
 			continue
 		}
 		readinto <- &Message{
@@ -111,7 +114,8 @@ func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *
 			FromPeerName: m.FromPeerName,
 			FromPeerAddr: p.conn.RemoteAddr().String(),
 			ToChatId:     p.ChatId,
-			Txt:          m.Txt,
+			Type:         m.Type,
+			Data:         m.Data,
 		}
 	}
 }

@@ -20,13 +20,22 @@ import (
 
 var upgrader = websocket.Upgrader{}
 
+type MessageType int
+
+const (
+	TypeText MessageType = iota
+	TypeImg
+	TypeGIF
+)
+
 type Message struct {
 	FromPeerId   uuid.UUID
 	FromPeerName string
 	ToChatId     uuid.UUID
 	FromPeerAddr string
 	ToPeerAddr   string
-	Txt          string `json:"text"`
+	Type         MessageType `json:"type"`
+	Data         []byte      `json:"data"`
 }
 
 type PeerInfo struct {
