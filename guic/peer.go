@@ -1,147 +1,170 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
+	"fmt"
+	"log"
 	"log/slog"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
-type ConnType int
+type PeerState int
 
 const (
-	TypeServer ConnType = iota
-	TypeClient
-)
-
-const (
-	maxMessageSizeBytes = 100 * 1024 * 1024
-
-	pongWait   = 60 * time.Second
-	pingPeriod = (pongWait * 9) / 10
-	writeWait  = 10 * time.Second
+	StatePending PeerState = iota
+	StateConnected
+	StateReady
 )
 
 type Peer struct {
-	// chat peer belongs to
-	ChatId uuid.UUID
-	PeerId uuid.UUID
-	Name   string
-	// peer connection
-	conn *websocket.Conn
-	// who is this peer: client or a server
-	connType ConnType
-	cancel   context.CancelFunc
-	send     chan *Message
-	key      []byte
+	id       uuid.UUID
+	state    PeerState
+	chat     *Chat
+	Name     string
+	conn     *webrtc.PeerConnection
+	CtrlChan *webrtc.DataChannel
+	MsgChan  *webrtc.DataChannel
+	ImgChan  *webrtc.DataChannel
 }
 
-func NewPeer(chatId uuid.UUID, peerId uuid.UUID, name string, conn *websocket.Conn, connT ConnType, key []byte) *Peer {
-	return &Peer{
-		ChatId:   chatId,
-		PeerId:   peerId,
-		Name:     name,
-		conn:     conn,
-		send:     make(chan *Message, 100),
-		connType: connT,
-		key:      key,
-		// aesgcm:   aesgcm,
+func SetupOfferor(
+	c *webrtc.PeerConnection,
+	name string,
+	r chan<- struct {
+		string
+		*Peer
+	}) (*Peer, error) {
+	p := &Peer{
+		id:    uuid.New(),
+		state: StatePending,
+		conn:  c,
 	}
-}
-
-// gracefully closes peer connection
-func (p *Peer) SendDisconnect() error {
-	return p.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
-		websocket.CloseNormalClosure, ""),
-	)
-}
-
-// encrypts and writes message to underlying peer connection
-func (p *Peer) sendMessage(m *Message) error {
-	data, err := json.Marshal(m)
+	var err error
+	p.CtrlChan, err = c.CreateDataChannel("ctrl", nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	cipherdata, err := Encrypt(data, p.key)
+	p.MsgChan, err = c.CreateDataChannel("msg", nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	if err := p.conn.WriteMessage(websocket.BinaryMessage, cipherdata); err != nil {
-		return err
+	p.ImgChan, err = c.CreateDataChannel("img", nil)
+	if err != nil {
+		return nil, err
 	}
-	return nil
-}
 
-func (p *Peer) startReader(ctx context.Context, onStop func(), readinto chan<- *Message) {
-	defer func() { p.conn.Close() }()
-	defer onStop()
-	p.conn.SetReadLimit(maxMessageSizeBytes)
-	p.conn.SetReadDeadline(time.Now().Add(pongWait))
-	p.conn.SetPongHandler(func(appData string) error {
-		p.conn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
+	p.CtrlChan.OnOpen(func() {
+		slog.Debug("channel opened", "name", p.CtrlChan.Label())
+		if err := p.CtrlChan.SendText(fmt.Sprintf("0 %s", name)); err != nil {
+			slog.Error("error sending name")
+		}
 	})
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
+	p.CtrlChan.OnClose(func() {
+		slog.Debug("channel closed", "name", p.CtrlChan.Label())
+	})
+	p.CtrlChan.OnMessage(func(m webrtc.DataChannelMessage) {
+		slog.Debug("channel msg recieved", "name", p.CtrlChan.Label(), "text", string(m.Data))
+		if string(m.Data)[0] == '0' {
+			slog.Debug("recv peer name", "name", string(m.Data))
+			p.Name = string(m.Data)[2:]
 		}
-		mtype, data, err := p.conn.ReadMessage()
-		if err != nil {
-			slog.Error("message read", "error", err)
-			break
+		if p.MsgChan != nil && p.ImgChan != nil {
+			p.state = StateReady
 		}
-		if mtype != websocket.BinaryMessage {
-			continue
-		}
-		plaindata, err := Decrypt(data, p.key)
-		if err != nil {
-			slog.Error("message read decrypt", "error", err)
-			continue
-		}
-		m := &Message{}
-		if err = json.Unmarshal(plaindata, m); err != nil {
-			slog.Error("message read unmarshal", "error", err)
-			continue
-		}
-		readinto <- &Message{
-			FromPeerId:   p.PeerId,
-			FromPeerName: m.FromPeerName,
-			FromPeerAddr: p.conn.RemoteAddr().String(),
-			ToChatId:     p.ChatId,
-			Type:         m.Type,
-			Data:         m.Data,
-		}
-	}
+	})
+
+	p.MsgChan.OnOpen(func() {
+		slog.Debug("channel opened", "name", p.MsgChan.Label())
+	})
+	p.MsgChan.OnClose(func() {
+		slog.Debug("channel closed", "name", p.MsgChan.Label())
+	})
+	p.MsgChan.OnMessage(func(m webrtc.DataChannelMessage) {
+		slog.Debug("channel msg recieved", "name", p.MsgChan.Label(), "text", string(m.Data))
+		r <- struct {
+			string
+			*Peer
+		}{string(m.Data), p}
+	})
+
+	p.ImgChan.OnOpen(func() {
+		slog.Debug("channel opened", "name", p.ImgChan.Label())
+	})
+	p.ImgChan.OnClose(func() {
+		slog.Debug("channel closed", "name", p.ImgChan.Label())
+	})
+	p.ImgChan.OnMessage(func(msg webrtc.DataChannelMessage) {
+		slog.Debug("channel msg recieved", "name", p.ImgChan.Label(), "data", msg.Data)
+	})
+
+	return p, nil
 }
 
-func (p *Peer) startWriter(ctx context.Context, onStop func()) {
-	ticker := time.NewTicker(pingPeriod)
-	defer close(p.send)
-	defer ticker.Stop()
-	defer onStop()
-	for {
-		select {
-		case <-ctx.Done():
-			p.SendDisconnect()
-			return
-		case m := <-p.send:
-			if err := p.sendMessage(m); err != nil {
-				slog.Error("peer write message", "error", err)
-				return
-			}
-		case <-ticker.C:
-			err := p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
-			if err != nil {
-				slog.Error("write ping message", "error", err)
-				return
-			}
-			slog.Debug("ping", "who", p.conn.RemoteAddr())
+func SetupOfferee(
+	c *webrtc.PeerConnection,
+	name string,
+	r chan<- struct {
+		string
+		*Peer
+	}) (*Peer, error) {
+	p := &Peer{
+		id:    uuid.New(),
+		state: StatePending,
+		conn:  c,
+	}
+	c.OnDataChannel(func(dc *webrtc.DataChannel) {
+		switch dc.Label() {
+		case "ctrl":
+			p.CtrlChan = dc
+			p.CtrlChan.OnOpen(func() {
+				slog.Debug("ctrl dc opened")
+				if err := p.CtrlChan.SendText(fmt.Sprintf("0 %s", name)); err != nil {
+					slog.Error("error sending name")
+				}
+			})
+			p.CtrlChan.OnMessage(func(m webrtc.DataChannelMessage) {
+				slog.Debug("channel msg recieved", "name", p.CtrlChan.Label(), "text", string(m.Data))
+				if string(m.Data)[0] == '0' {
+					slog.Debug("recv peer name", "name", string(m.Data))
+					p.Name = string(m.Data)[2:]
+				}
+				if p.MsgChan != nil && p.ImgChan != nil {
+					p.state = StateReady
+				}
+			})
+		case "msg":
+			p.MsgChan = dc
+			p.MsgChan.OnMessage(func(m webrtc.DataChannelMessage) {
+				slog.Debug("channel msg received", "name", p.MsgChan.Label(), "data", m.Data)
+				r <- struct {
+					string
+					*Peer
+				}{string(m.Data), p}
+			})
+		case "img":
+			p.ImgChan = dc
+		default:
+			log.Fatalln("unknown channel label")
 		}
+		if p.CtrlChan != nil && p.MsgChan != nil && p.ImgChan != nil && p.Name != "" {
+			p.state = StateReady
+		}
+	})
+	return p, nil
+}
+
+func (p *Peer) Disconnect() {
+	if p.CtrlChan != nil {
+		p.CtrlChan.Close()
+	}
+	if p.MsgChan != nil {
+		p.MsgChan.Close()
+	}
+	if p.ImgChan != nil {
+		p.ImgChan.Close()
+	}
+	if p.conn != nil {
+		p.conn.Close()
 	}
 }

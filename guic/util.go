@@ -1,12 +1,8 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"math/rand/v2"
-
-	"github.com/google/uuid"
 )
 
 var adjectives = [...]string{
@@ -341,17 +337,4 @@ func RandSecret(n uint64) []byte {
 		b[i] = secretLetters[rand.IntN(len(secretLetters))]
 	}
 	return b
-}
-
-func CreateConnectionString(key []byte, chatId uuid.UUID, address string) ([]byte, error) {
-	encChatId, err := Encrypt(chatId[:], key)
-	if err != nil {
-		return nil, err
-	}
-	b64chatId := base64.StdEncoding.EncodeToString(encChatId)
-	condata, err := json.Marshal(&ConnectionCredentials{address, b64chatId})
-	if err != nil {
-		return nil, err
-	}
-	return []byte(base64.StdEncoding.EncodeToString(condata)), nil
 }

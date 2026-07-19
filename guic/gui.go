@@ -29,3 +29,44 @@ func NewPeerRequestElement(text string, accepted chan<- bool) *fyne.Container {
 		widget.NewButton("✖", func() { accepted <- false }),
 	)
 }
+
+func NewPendingPeerElement(name string, ok chan<- string, cancel chan<- struct{}) *fyne.Container {
+	answerEntry := widget.NewEntry()
+	answerEntry.SetPlaceHolder("Paste peer answer here")
+	okBtn := widget.NewButton("Submit", func() {
+		if len(answerEntry.Text) > 0 {
+			ok <- answerEntry.Text
+		}
+	})
+	cancelBtn := widget.NewButton("Cancel", func() {
+		cancel <- struct{}{}
+	})
+	return container.NewVBox(
+		widget.NewLabel(name),
+		answerEntry,
+		container.NewHBox(
+			okBtn,
+			cancelBtn,
+		),
+	)
+}
+
+func CpyPopup(message string, cpy string, canvas fyne.Canvas) *widget.PopUp {
+	var modal *widget.PopUp
+	closeBtn := widget.NewButton("Close", func() {
+		modal.Hide()
+	})
+	entry := widget.NewEntry()
+	entry.SetText(cpy)
+	entry.Disable()
+	popupContent := container.NewVBox(
+		widget.NewLabel(message),
+		entry,
+		closeBtn,
+	)
+	modal = widget.NewModalPopUp(
+		popupContent,
+		canvas,
+	)
+	return modal
+}

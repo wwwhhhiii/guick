@@ -1,9 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"crypto/ecdh"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -12,13 +9,13 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/webrtc/v4"
 	"golang.design/x/clipboard"
 
 	"fyne.io/fyne/v2"
@@ -30,15 +27,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// BUG incorrect IP in connection string
-// BUG client will create many instances of the same chat if connecting to the same server
-
-// TODO add calls (audio, video)
-// TODO add send of gifs
-// TODO add headless mode
-
-var appHost = flag.String("host", "0.0.0.0", "http server host")
-var appPort = flag.String("port", "8080", "http server port")
 var debug = flag.Bool("debug", false, "debug mode")
 
 var programLevel = slog.LevelInfo
@@ -55,156 +43,96 @@ var currentChatWindow *container.Scroll = nil
 var fyneChatList = []uuid.UUID{}
 
 // chat containers to select from when selecting current chat in UI
-var chatsMap = make(map[uuid.UUID]*container.Scroll)
+var chatsMapUI = make(map[uuid.UUID]*container.Scroll)
 
-var sentConnectRequests = make(map[string]struct{})
+var chatsMap = make(map[uuid.UUID]*Chat)
+
+// pending peer yet to be connected
+type PendingPeer struct {
+	conn     *webrtc.PeerConnection
+	dataChan *webrtc.DataChannel
+	toChat   *Chat
+}
+
+func (p *PendingPeer) close() {
+	if p.dataChan != nil {
+		p.dataChan.Close()
+	}
+	if p.conn != nil {
+		p.conn.Close()
+	}
+}
 
 var localAddrs = make(map[string]struct{}, 100)
 
 func main() {
 	flag.Parse()
-
 	if *debug {
 		programLevel = slog.LevelDebug
 	}
+
 	h := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: programLevel})
 	slog.SetDefault(slog.New(h))
 
-	serverHost := net.ParseIP(*appHost)
-	serverAddr := net.JoinHostPort(*appHost, *appPort)
-	if serverHost == nil {
-		slog.Error("Invalid listen host", "host", *appHost)
-		return
-	}
-	if serverHost.IsUnspecified() {
-		// we don't know which iface will be used for accepting the connection.
-		// So need to parse all interfaces addresses to prevent self-connection
-
-		// hack to add 0.0.0.0 address
-		localAddrs[net.JoinHostPort(net.IPv4zero.String(), *appPort)] = struct{}{}
-		ifaces, err := net.Interfaces()
-		if err != nil {
-			slog.Error("net interface read", "error", err)
-			return
-		}
-		for _, iface := range ifaces {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, netaddr := range addrs {
-				ip, _, err := net.ParseCIDR(netaddr.String())
-				if err != nil {
-					continue
-				}
-				localAddrs[net.JoinHostPort(ip.String(), *appPort)] = struct{}{}
-			}
-		}
-	} else {
-		localAddrs[serverAddr] = struct{}{}
+	// webrtc
+	webrtcConf := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
 	}
 
-	onPeerRegistered := make(chan *Peer)
-	onPeerUnregistered := make(chan *Peer)
-	onRecvMessage := make(chan *Message)
-	onSentMessage := make(chan *Message)
-	hub := newHub(onPeerRegistered, onPeerUnregistered, onRecvMessage, onSentMessage)
-	defer hub.Shutdown()
+	// app
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
-	go hub.Run(interrupt)
 
-	// generate ecdh key-pair
-	// used to derive shared secret and then transient encryption key to communicate
-	// with each peer
-	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	// generate a persistent encryption key for signing server provided data
-	signKey, err := NewKey()
-	if err != nil {
-		panic(err)
-	}
+	peerConnected := make(chan *Peer, 50)
+	peerDisconnected := make(chan *Peer, 50)
+	messageReceived := make(chan struct {
+		string
+		*Peer
+	}, 100)
+	// TODO messageSent
+	_ = make(chan struct {
+		string
+		*Chat
+	}, 100)
+	ctrlMessage := make(chan struct {
+		string
+		*Peer
+	}, 10)
+	imgMessage := make(chan struct {
+		byte
+		*Peer
+	}, 10)
 
 	var application fyne.App
 	var mainWindow fyne.Window
-	var requestsContainer *fyne.Container
-
-	// UI confirmation for incoming connections
-	acceptConnection := func(r *http.Request) (<-chan bool, func()) {
-		acceptChan := make(chan bool)
-		displayName := r.RemoteAddr
-		cookies := r.Cookies()
-		if len(cookies) > 0 {
-			if cookies[0].Name == "nickname" {
-				displayName = cookies[0].Value
-			}
-		}
-		// accept chan awaits button press inside element
-		requestElement := NewPeerRequestElement(displayName, acceptChan)
-		fyne.Do(func() { requestsContainer.Add(requestElement) })
-		fyne.Do(requestsContainer.Refresh)
-		closer := func() {
-			close(acceptChan)
-			fyne.Do(func() { requestsContainer.Remove(requestElement) })
-		}
-		return acceptChan, closer
-	}
+	var pendingPeersContainer *fyne.Container
 
 	nickname := GenRandNickname()
-	wsHandler := &wsServeHandler{
-		hub:           hub,
-		peerInfo:      &PeerInfo{ourPeerId, nickname},
-		privateKey:    privateKey,
-		_key:          signKey,
-		requestAccept: acceptConnection,
-	}
-	http.HandleFunc("/ws", wsHandler.serveWs)
-	slog.Info("application is running", "address", serverAddr, "name", nickname)
-	go http.ListenAndServe(serverAddr, nil)
+	slog.Info("app is running", "name", nickname)
 
 	application = app.New()
 	mainWindow = application.NewWindow("Guic")
 	mainWindow.Resize(fyne.NewSize(800, 600))
 
-	peerAddressEntry := widget.NewEntry()
-	peerAddressEntry.SetPlaceHolder("Peer IP / Connection String")
+	peerOfferEntry := widget.NewEntry()
+	peerOfferEntry.SetPlaceHolder("Paste peer offer here")
 
 	chatList := widget.NewList(
 		func() int { return len(fyneChatList) },
 		func() fyne.CanvasObject {
 			chatIdLabel := widget.NewLabel("")
-			btn := widget.NewButton("cpy", func() {
-				chatId, err := uuid.Parse(chatIdLabel.Text)
-				if err != nil {
-					NewModalPopup("Chat id parse error", mainWindow.Canvas()).Show()
-					return
-				}
-				if err := clipboard.Init(); err != nil {
-					NewModalPopup("clipboard not available", mainWindow.Canvas()).Show()
-					return
-				}
-				chat, exist := hub.LockedPeekChat(chatId)
-				if !exist {
-					panic("selected chat does not exist")
-				}
-				if !chat.isHosted {
-					NewModalPopup("you are not chat host", mainWindow.Canvas()).Show()
-					return
-				}
-				cs, err := CreateConnectionString(signKey, chatId, serverAddr)
-				clipboard.Write(clipboard.FmtText, cs)
-				NewModalPopup("Copied to clipboard", mainWindow.Canvas()).Show()
-			})
-			return container.NewHBox(chatIdLabel, btn)
+			return container.NewHBox(chatIdLabel)
 		},
 		func(lii widget.ListItemID, co fyne.CanvasObject) {
 			chatId := fyneChatList[lii]
 			if chatId == uuid.Nil {
 				return
 			}
-			chat, exist := hub.chats[chatId]
+			chat, exist := chatsMap[chatId]
 			if !exist {
 				log.Fatalf("chat not found: %s", chatId)
 			}
@@ -212,68 +140,239 @@ func main() {
 		},
 	)
 
-	uiOnConnect := func() {
-		if peerAddressEntry.Text == "" {
+	uiOnOffer := func() {
+		if peerOfferEntry.Text == "" {
 			return
 		}
-		connCreds := &ConnectionCredentials{}
-		// treat it as connection string first
-		conndata, err := base64.StdEncoding.DecodeString(peerAddressEntry.Text)
-		if err == nil {
-			if err = json.Unmarshal(conndata, connCreds); err != nil {
-				NewModalPopup("invalid connection credentials format", mainWindow.Canvas()).Show()
-				return
-			}
-		} else {
-			// if connection string parse failed - parse ipv4 address
-			host, port, err := net.SplitHostPort(peerAddressEntry.Text)
-			if err != nil {
-				NewModalPopup(fmt.Sprintf("invalid peer address: %s", err), mainWindow.Canvas()).Show()
-				return
-			}
-			if peerHost := net.ParseIP(host); peerHost == nil {
-				NewModalPopup("incorrect IP address format", mainWindow.Canvas()).Show()
-				return
-			}
-			connCreds.ServerAddress = net.JoinHostPort(host, port)
-			// tell server-peer that we don't have a connection string and want a fresh chat
-			// by providing empty cipherdata
-			connCreds.Cipherdata = ""
+		encsdpstr := peerOfferEntry.Text
+		sdpData, err := base64.StdEncoding.DecodeString(encsdpstr)
+		if err != nil {
+			slog.Error("peer offer SDP decode", "error", err)
+			return
+		}
+		sdp := webrtc.SessionDescription{}
+		if err := json.Unmarshal(sdpData, &sdp); err != nil {
+			slog.Error("error sdp unmarshal")
+			return
+		}
+		conn, err := webrtc.NewPeerConnection(webrtcConf)
+		if err != nil {
+			slog.Error("error opening connection")
+		}
+		chat := &Chat{id: uuid.New(), peers: make(map[uuid.UUID]*Peer), isHosted: false}
+		chatsMap[chat.id] = chat
+		peer, err := SetupOfferee(conn, nickname, messageReceived)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		chat.addPeers(peer)
+
+		if err := conn.SetRemoteDescription(sdp); err != nil {
+			log.Fatalln(err)
 		}
 
-		if _, exist := localAddrs[connCreds.ServerAddress]; exist {
-			NewModalPopup("can't connect to self", mainWindow.Canvas()).Show()
-			return
+		answer, err := conn.CreateAnswer(nil)
+		if err != nil {
+			log.Fatalln(err)
 		}
-		if _, requestSent := sentConnectRequests[connCreds.ServerAddress]; requestSent {
-			NewModalPopup("request already sent", mainWindow.Canvas()).Show()
-			return
+
+		if err = conn.SetLocalDescription(answer); err != nil {
+			log.Fatalln(err)
 		}
-		go func() {
-			sentConnectRequests[connCreds.ServerAddress] = struct{}{}
-			defer func() { delete(sentConnectRequests, connCreds.ServerAddress) }()
-			peer, err := ConnectToPeer(
-				privateKey,
-				&ConnectionInfo{PeerInfo{ourPeerId, nickname}, *connCreds},
-			)
-			if err != nil {
-				slog.Error("connect to server-peer", "error", err)
-				NewModalPopup(fmt.Sprintf("connection error: %s", err), mainWindow.Canvas()).Show()
-				return
+
+		// TODO async this
+		iceGatherComplete := webrtc.GatheringCompletePromise(conn)
+		<-iceGatherComplete
+
+		pConnected := make(chan struct{})
+		conn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+			slog.Debug("connection state", "peer", "", "state", state.String())
+			if state == webrtc.PeerConnectionStateFailed {
+				chat.DisconnectPeer(peer.id)
 			}
-			hub.RegisterPeer(peer)
+			if state == webrtc.PeerConnectionStateClosed {
+				chat.DisconnectPeer(peer.id)
+			}
+			if state == webrtc.PeerConnectionStateConnected {
+				peer.state = StateConnected
+				peerConnected <- peer
+				pConnected <- struct{}{}
+			}
+			if state == webrtc.PeerConnectionStateDisconnected {
+				peerDisconnected <- peer
+				delete(chatsMap, peer.chat.id)
+			}
+		})
+
+		ssdp, err := conn.RemoteDescription().Unmarshal()
+		if err != nil {
+			// TODO upanic
+			panic(err)
+		}
+		for _, d := range ssdp.MediaDescriptions {
+			for _, a := range d.Attributes {
+				if a.IsICECandidate() {
+					err := conn.AddICECandidate(webrtc.ICECandidateInit{Candidate: a.String()})
+					if err != nil {
+						slog.Error("add ICE candidate", "error", err)
+					} else {
+						slog.Debug("add ICE candidate", "candidate", a.String())
+					}
+				}
+			}
+		}
+
+		peerOfferEntry.SetText("")
+
+		sdpdata, err := json.Marshal(answer)
+		if err != nil {
+			slog.Error("peer answer marshal", "error", err)
+			NewModalPopup(fmt.Sprintf("%s", err), mainWindow.Canvas()).Show()
+			return
+		}
+		sdpstr := base64.StdEncoding.EncodeToString(sdpdata)
+		CpyPopup("Share this with your peer", sdpstr, mainWindow.Canvas()).Show()
+	}
+
+	peerOfferEntry.OnSubmitted = func(s string) { uiOnOffer() }
+
+	uiOnGenerateOffer := func() {
+		conn, err := webrtc.NewPeerConnection(webrtcConf)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		// TODO add currently opened chat or create new if no chat opened
+		// TODO also delete it after peer disconnect if chat was created if error occurs
+		chat := &Chat{id: uuid.New(), peers: make(map[uuid.UUID]*Peer), isHosted: true}
+		// TODO maybe it is already present
+		chatsMap[chat.id] = chat
+		peer, err := SetupOfferor(conn, nickname, messageReceived)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		chat.addPeers(peer)
+
+		offer, err := conn.CreateOffer(nil)
+		if err != nil {
+			slog.Error("create peer connection", "error", err)
+			return
+		}
+
+		if err = conn.SetLocalDescription(offer); err != nil {
+			slog.Error("set local SDP", "error", err)
+			return
+		}
+
+		// TODO async this
+		iceGatherComplete := webrtc.GatheringCompletePromise(conn)
+		<-iceGatherComplete
+
+		conn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+			slog.Debug("connection state", "peer", "", "state", state.String())
+			if state == webrtc.PeerConnectionStateFailed {
+				chat.DisconnectPeer(peer.id)
+			}
+			if state == webrtc.PeerConnectionStateClosed {
+				chat.DisconnectPeer(peer.id)
+			}
+			if state == webrtc.PeerConnectionStateConnected {
+				peer.state = StateConnected
+				peerConnected <- peer
+			}
+			if state == webrtc.PeerConnectionStateDisconnected {
+				peerDisconnected <- peer
+				delete(chatsMap, peer.chat.id)
+			}
+		})
+
+		sdpdata, err := json.Marshal(*conn.LocalDescription())
+		if err != nil {
+			slog.Error("peer offer marshal", "id", peer.id, "error", err)
+			chat.DisconnectPeer(peer.id)
+			return
+		}
+		sdpstr := base64.StdEncoding.EncodeToString(sdpdata)
+		if err = clipboard.Init(); err != nil {
 			NewModalPopup(
-				fmt.Sprintf("Client %s connected!", peer.Name),
+				fmt.Sprintf(
+					"Clipboard is not available, share the following string with your peer:\n%s",
+					sdpstr,
+				),
 				mainWindow.Canvas(),
 			).Show()
+		}
+		clipboard.Write(clipboard.FmtText, []byte(sdpstr))
+		NewModalPopup("Copied to clipboard, share it with your peer", mainWindow.Canvas()).Show()
+
+		// add pending peer
+		answerCh := make(chan string)
+		cancelCh := make(chan struct{})
+		pendingPeerElement := NewPendingPeerElement(GenRandNickname(), answerCh, cancelCh)
+		pendingPeersContainer.Add(pendingPeerElement)
+
+		// TODO possibly read errors and log to logs window
+		// pending peer handler
+		go func() {
+			defer func() {
+				pendingPeersContainer.Remove(pendingPeerElement)
+			}()
+			for {
+				select {
+				case <-time.After(60 * time.Second):
+					slog.Error("pending peer answer wait timeout", "id", peer.id)
+					chat.DisconnectPeer(peer.id)
+					return
+				case answer := <-answerCh:
+					sdpdata, err := base64.StdEncoding.DecodeString(answer)
+					if err != nil {
+						slog.Error("pending peer SDP answer decode", "id", peer.id, "error", err)
+						chat.DisconnectPeer(peer.id)
+						return
+					}
+					sdpanswer := webrtc.SessionDescription{}
+					if err := json.Unmarshal(sdpdata, &sdpanswer); err != nil {
+						slog.Error("pending peer SDP answer read", "id", peer.id, "error", err)
+						chat.DisconnectPeer(peer.id)
+						return
+					}
+					if err := peer.conn.SetRemoteDescription(sdpanswer); err != nil {
+						slog.Error("set remote peer SDP", "id", peer.id, "error", err)
+						chat.DisconnectPeer(peer.id)
+						return
+					}
+					remoteSDP, err := conn.RemoteDescription().Unmarshal()
+					if err != nil {
+						slog.Error("read remote peer SDP", "id", peer.id, "error", err)
+						chat.DisconnectPeer(peer.id)
+						return
+					}
+					for _, d := range remoteSDP.MediaDescriptions {
+						for _, a := range d.Attributes {
+							if a.IsICECandidate() {
+								err := conn.AddICECandidate(webrtc.ICECandidateInit{Candidate: a.String()})
+								if err != nil {
+									slog.Error("add ICE candidate", "id", peer.id, "error", err)
+								} else {
+									slog.Debug("add ICE candidate", "id", peer.id, "candidate", a.String())
+								}
+							}
+						}
+					}
+					return
+				case <-cancelCh:
+					slog.Info("pending peer cancelled", "id", peer.id)
+					chat.DisconnectPeer(peer.id)
+					return
+				}
+			}
 		}()
-		NewModalPopup("Request sent", mainWindow.Canvas()).Show()
-		peerAddressEntry.SetText("")
 	}
-	peerAddressEntry.OnSubmitted = func(s string) { uiOnConnect() }
-	connEntry := container.NewVBox(
-		peerAddressEntry,
-		widget.NewButton("Connect", uiOnConnect),
+
+	offerEntry := container.NewVBox(
+		peerOfferEntry,
+		widget.NewButton("Answer", uiOnOffer),
+		widget.NewButton("Generate offer", uiOnGenerateOffer),
 	)
 	rmChatBtn := widget.NewButton("Remove", func() {
 		rmChat := func(remove bool) {
@@ -283,31 +382,18 @@ func main() {
 			if selectedChatId == uuid.Nil {
 				return
 			}
-			chat, exist := hub.LockedPeekChat(selectedChatId)
+			// TODO mux
+			chat, exist := chatsMap[selectedChatId]
 			if exist {
-				hub.removeChat <- chat
+				chat.Close()
 			}
+			delete(chatsMap, chat.id)
 		}
 		dialog.NewConfirm("Confirm", "Remove chat?", rmChat, mainWindow).Show()
 	})
 	rmChatBtn.Disable()
-	cpyConnStringBtn := widget.NewButton("Copy connection string", func() {
-		if err := clipboard.Init(); err != nil {
-			NewModalPopup("clipboard not available", mainWindow.Canvas()).Show()
-			return
-		}
-		chatId := uuid.New()
-		constr, err := CreateConnectionString(signKey, chatId, serverAddr)
-		if err != nil {
-			slog.Error("connection string generation", "error", err)
-			NewModalPopup("connection string generation error", mainWindow.Canvas()).Show()
-			return
-		}
-		clipboard.Write(clipboard.FmtText, constr)
-		NewModalPopup("Copied to clipboard", mainWindow.Canvas()).Show()
-	})
 	connContainer := container.NewBorder(
-		container.NewVBox(connEntry, cpyConnStringBtn),
+		container.NewVBox(offerEntry),
 		nil, nil, nil,
 		container.NewBorder(nil, rmChatBtn, nil, nil, chatList),
 	)
@@ -322,15 +408,24 @@ func main() {
 			NewModalPopup("Select chat first", mainWindow.Canvas()).Show()
 			return
 		}
-		if _, exist := hub.chats[selectedChatId]; !exist {
-			log.Fatalf("selected chat not found in hub: %s", selectedChatId)
+		chat, exist := chatsMap[selectedChatId]
+		if !exist {
+			log.Fatalf("selected chat %s not found in global chats map", selectedChatId)
 		}
-		hub.sendMessage <- &Message{
-			FromPeerId:   ourPeerId,
-			FromPeerName: nickname,
-			ToChatId:     selectedChatId,
-			Type:         TypeText,
-			Data:         []byte(text),
+
+		chatUI, exist := chatsMapUI[chat.id]
+		if !exist {
+			slog.Error("chat not found in UI chats", "id", chat.id)
+			return
+		}
+		content := chatUI.Content.(*fyne.Container)
+		t := canvas.NewText(fmt.Sprintf("%s ", textEntry.Text), color.White)
+		content.Add(container.NewBorder(nil, nil, nil, t))
+		content.Refresh()
+		chatUI.ScrollToBottom()
+
+		if err := chat.sendMessage(text); err != nil {
+			slog.Error("send message", "error", err)
 		}
 		textEntry.SetText("")
 	}
@@ -346,17 +441,11 @@ func main() {
 			if r == nil {
 				return
 			}
-			data, err := io.ReadAll(r)
+			// TODO
+			_, err = io.ReadAll(r)
 			if err != nil {
 				// TODO some notification if file cant be processed
 				return
-			}
-			hub.sendMessage <- &Message{
-				FromPeerId:   ourPeerId,
-				FromPeerName: nickname,
-				ToChatId:     selectedChatId,
-				Type:         TypeFile,
-				Data:         data,
 			}
 		}
 		dialog.NewFileOpen(onSelect, mainWindow).Show()
@@ -372,23 +461,23 @@ func main() {
 	chatBorder := container.NewBorder(
 		nil, textSendEntry, nil, nil, placeholderTextGrid,
 	)
-	requestsContainer = container.NewVBox()
+	pendingPeersContainer = container.NewVBox()
 	content := container.NewHSplit(
 		container.NewAppTabs(
 			container.NewTabItem("Peers", connContainer),
-			container.NewTabItem("Requests", requestsContainer),
+			container.NewTabItem("Pending", pendingPeersContainer),
 		),
 		chatBorder,
 	)
 	content.SetOffset(0.3)
 
 	getOrCreateChatWindow := func(chatId uuid.UUID) *container.Scroll {
-		if _, exist := chatsMap[chatId]; !exist {
+		if _, exist := chatsMapUI[chatId]; !exist {
 			w := container.NewVScroll(container.NewVBox())
 			w.SetMinSize(fyne.NewSize(200, 50))
-			chatsMap[chatId] = w
+			chatsMapUI[chatId] = w
 		}
-		return chatsMap[chatId]
+		return chatsMapUI[chatId]
 	}
 
 	chatList.OnSelected = func(lii widget.ListItemID) {
@@ -455,90 +544,47 @@ func main() {
 			slog.Error("clipboard not available")
 			return
 		}
-		data := clipboard.Read(clipboard.FmtImage)
-		hub.sendMessage <- &Message{
-			FromPeerId:   ourPeerId,
-			FromPeerName: nickname,
-			ToChatId:     selectedChatId,
-			Type:         TypeImg,
-			Data:         data,
-		}
+		// TODO
+		// data := clipboard.Read(clipboard.FmtImage)
 	})
 
 	// a UI reactor
-	// essentially reads events from hub channels and updates relevant UI components
 	go func() {
 		for {
 			select {
-			case peer := <-onPeerRegistered:
-				if _, exist := chatsMap[peer.ChatId]; !exist {
-					fyneChatList = append(fyneChatList, peer.ChatId)
+			case peer := <-peerConnected:
+				if _, exist := chatsMapUI[peer.chat.id]; !exist {
+					fyneChatList = append(fyneChatList, peer.chat.id)
 				}
 				fyne.Do(chatList.Refresh)
-				getOrCreateChatWindow(peer.ChatId)
-			case chat := <-hub.ChatRemoved:
-				rmChatFromList(chat.id, &fyneChatList, chatList)
-				lii := slices.Index(fyneChatList, chat.id)
+				getOrCreateChatWindow(peer.chat.id)
+			case peer := <-peerDisconnected:
+				// TODO review this case
+				rmChatFromList(peer.chat.id, &fyneChatList, chatList)
+				lii := slices.Index(fyneChatList, peer.chat.id)
 				if lii != -1 {
 					chatId := fyneChatList[lii]
-					delete(chatsMap, chatId)
+					delete(chatsMapUI, chatId)
 					chatList.Unselect(widget.ListItemID(lii))
 				}
 				fyne.Do(chatList.Refresh)
-			case msg := <-onRecvMessage:
-				chat, exist := chatsMap[msg.ToChatId]
+			case msg := <-messageReceived:
+				chat, exist := chatsMapUI[msg.Peer.chat.id]
 				if !exist {
-					log.Fatalf("error, no chat window found for %s", msg.ToChatId)
+					slog.Error("no chat window found", "chat", msg.Peer.chat.id)
+					continue
 				}
 				chatContent := chat.Content.(*fyne.Container)
-				switch msg.Type {
-				case TypeText:
-					m := fmt.Sprintf("[%s]: %s", msg.FromPeerName, msg.Data)
-					t := canvas.NewText(m, color.White)
-					fyne.Do(func() {
-						chatContent.Add(container.NewBorder(nil, nil, t, nil))
-						chatContent.Refresh()
-					})
-				case TypeImg:
-					img := canvas.NewImageFromReader(bytes.NewReader(msg.Data), uuid.New().String())
-					img.FillMode = canvas.ImageFillOriginal
-					m := fmt.Sprintf("[%s]:", msg.FromPeerName)
-					t := canvas.NewText(m, color.White)
-					fyne.Do(func() {
-						chatContent.Add(container.NewBorder(nil, nil, t, nil))
-						chatContent.Add(container.NewBorder(nil, nil, img, nil))
-						chatContent.Refresh()
-					})
-				case TypeFile:
-					t := canvas.NewText(fmt.Sprintf("[%s]: %s", msg.FromPeerName, "<File sent>"), color.White)
-					fyne.Do(func() {
-						chatContent.Add(container.NewBorder(nil, nil, t, nil))
-						chatContent.Refresh()
-					})
-				}
-			case msg := <-onSentMessage:
-				chat, exist := chatsMap[msg.ToChatId]
-				if !exist {
-					log.Fatalf("error, no chat window found for %s", msg.ToChatId)
-				}
-				chatContent := chat.Content.(*fyne.Container)
-				switch msg.Type {
-				case TypeText:
-					m := fmt.Sprintf("%s  ", msg.Data)
-					t := canvas.NewText(m, color.White)
-					fyne.Do(func() {
-						chatContent.Add(container.NewBorder(nil, nil, nil, t))
-						chatContent.Refresh()
-						chat.ScrollToBottom()
-					})
-				case TypeImg:
-					img := canvas.NewImageFromReader(bytes.NewReader(msg.Data), uuid.New().String())
-					img.FillMode = canvas.ImageFillOriginal
-					fyne.Do(func() {
-						chatContent.Add(container.NewBorder(nil, nil, nil, img))
-						chatContent.Refresh()
-					})
-				}
+				m := fmt.Sprintf("[%s]: %s", msg.Peer.Name, msg.string)
+				t := canvas.NewText(m, color.White)
+				fyne.Do(func() {
+					chatContent.Add(container.NewBorder(nil, nil, t, nil))
+					chatContent.Refresh()
+				})
+			case msg := <-ctrlMessage:
+				slog.Info("ctrl message", "msg", msg.string, "peer", msg.Peer)
+			case msg := <-imgMessage:
+				slog.Info("img message", "data", msg.byte)
 			}
 		}
 	}()
