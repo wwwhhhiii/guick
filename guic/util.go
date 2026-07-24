@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+
+	"github.com/pion/webrtc/v4"
 )
 
 var adjectives = [...]string{
@@ -337,4 +341,16 @@ func RandSecret(n uint64) []byte {
 		b[i] = secretLetters[rand.IntN(len(secretLetters))]
 	}
 	return b
+}
+
+func decodeSdp(b64s string) (*webrtc.SessionDescription, error) {
+	sdpData, err := base64.StdEncoding.DecodeString(b64s)
+	if err != nil {
+		return nil, err
+	}
+	sdp := &webrtc.SessionDescription{}
+	if err := json.Unmarshal(sdpData, sdp); err != nil {
+		return nil, err
+	}
+	return sdp, nil
 }

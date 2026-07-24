@@ -8,6 +8,7 @@ import (
 
 type Chat struct {
 	id       uuid.UUID
+	name     string
 	mu       sync.RWMutex
 	peers    map[uuid.UUID]*Peer
 	isHosted bool
