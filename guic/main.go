@@ -44,10 +44,6 @@ var fyneChatList = []uuid.UUID{}
 // chat containers to select from when selecting current chat in UI
 var chatsMapUI = make(map[uuid.UUID]*container.Scroll)
 
-var chatsMap = make(map[uuid.UUID]*Chat)
-
-var localAddrs = make(map[string]struct{}, 100)
-
 func main() {
 	flag.Parse()
 	if *debug {
@@ -70,12 +66,9 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	peerConnected := make(chan *Peer, 50)
-	peerDisconnected := make(chan *Peer, 50)
-	messageReceived := make(chan struct {
-		string
-		*Peer
-	}, 100)
+	peerConnectedUI := make(chan *Peer, 50)
+	peerDisconnectedUI := make(chan *Peer, 50)
+	messageReceived := make(chan *Message, 100)
 	ctrlMessage := make(chan struct {
 		string
 		*Peer
@@ -159,19 +152,16 @@ func main() {
 			go func() {
 				activity := widget.NewActivity()
 				activity.Start()
+				defer fyne.Do(func() { activity.Stop(); activity.Hide() })
 				fyne.Do(func() {
 					connectWin.SetContent(
 						container.NewBorder(widget.NewLabel("Contacting STUN servers"), nil, nil, nil, activity),
 					)
 				})
-				defer func() {
-					fyne.Do(func() { activity.Stop(); activity.Hide() })
-				}()
 
 				<-webrtc.GatheringCompletePromise(conn)
 				conn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 					slog.Debug("connection state", "peer", "", "state", state.String())
-					fyne.Do(connectWin.Close)
 					if state == webrtc.PeerConnectionStateFailed {
 						chat.DisconnectPeer(peer.id)
 					}
@@ -179,18 +169,17 @@ func main() {
 						chat.DisconnectPeer(peer.id)
 					}
 					if state == webrtc.PeerConnectionStateConnected {
-						peer.state |= connectedFlag
+						peer.addFlag(connectedFlag)
 						// need to wait for peer to send his data
 						<-peer.Ready()
-						peerConnected <- peer
+						peerConnectedUI <- peer
 						NewModalPopup(
 							fmt.Sprintf("Peer is %s connected", peer.Name), mainWindow.Canvas(),
 						).Show()
-						fyne.Do(func() { connectWin.Close() })
+						fyne.Do(connectWin.Close)
 					}
 					if state == webrtc.PeerConnectionStateDisconnected {
-						peer.state &= ^connectedFlag
-						peerDisconnected <- peer
+						peerDisconnectedUI <- peer
 						delete(chatsMap, peer.chat.id)
 					}
 				})
@@ -260,28 +249,26 @@ func main() {
 			chatsIds = append(chatsIds, k.String())
 		}
 		chatsSelect := widget.NewSelect(chatsIds, func(s string) {})
+		chatsSelect.PlaceHolder = "Create new chat"
 
 		submit := func() {
-
 			var chat *Chat
-			if chatsSelect.Selected == "" {
+			if chatsSelect.SelectedIndex() == -1 {
 				// TODO prompt user for chat name
 				chat = &Chat{id: uuid.New(), name: GenRandNickname(), peers: make(map[uuid.UUID]*Peer), isHosted: true}
-				// TODO add chat only after success
-				chatsMap[chat.id] = chat
 			} else {
 				id, err := uuid.Parse(chatsSelect.Selected)
 				if err != nil {
 					log.Fatalln(err)
 				}
 				var exist bool
-				chat, exist = chatsMap[id]
+				chat, exist = getChat(id)
 				if !exist {
-					log.Fatalln("such chat does not exist")
+					NewModalPopup("Error. Selected chat does not exist", addWin.Canvas()).Show()
 					return
 				}
 				if !chat.isHosted {
-					NewModalPopup("Chat is not hosted", addWin.Canvas()).Show()
+					NewModalPopup("You are not chat host", addWin.Canvas()).Show()
 					return
 				}
 			}
@@ -293,7 +280,6 @@ func main() {
 			if err != nil {
 				log.Fatalln(err)
 			}
-			chat.addPeers(peer)
 			offer, err := conn.CreateOffer(nil)
 			if err != nil {
 				slog.Error("create peer connection", "error", err)
@@ -306,15 +292,13 @@ func main() {
 			go func() {
 				activity := widget.NewActivity()
 				activity.Start()
+				defer fyne.Do(func() { activity.Stop(); activity.Hide() })
 				fyne.Do(func() {
 					addWin.SetContent(
 						container.NewBorder(
 							widget.NewLabel("Contacting STUN servers..."), nil, nil, nil, activity),
 					)
 				})
-				defer func() {
-					fyne.Do(func() { activity.Stop(); activity.Hide() })
-				}()
 
 				<-webrtc.GatheringCompletePromise(conn)
 
@@ -327,19 +311,19 @@ func main() {
 						chat.DisconnectPeer(peer.id)
 					}
 					if state == webrtc.PeerConnectionStateConnected {
-						peer.state |= connectedFlag
+						peer.addFlag(connectedFlag)
 						// need to wait for peer to send his data
 						<-peer.Ready()
-						peerConnected <- peer
-						NewModalPopup(
-							fmt.Sprintf("Peer is %s connected", peer.Name), mainWindow.Canvas(),
-						).Show()
-						fyne.Do(func() { addWin.Close() })
+						chat.addPeers(peer)
+						addChat(chat)
+						peerConnectedUI <- peer
+						fyne.Do(func() {
+							addWin.SetContent(container.NewVBox(widget.NewLabel(fmt.Sprintf("Peer %s is connected", peer.Name))))
+						})
 					}
 					if state == webrtc.PeerConnectionStateDisconnected {
-						peer.state &= ^connectedFlag
-						peerDisconnected <- peer
-						delete(chatsMap, peer.chat.id)
+						peerDisconnectedUI <- peer
+						rmChat(peer.chat.id)
 					}
 				})
 				sdpdata, err := json.Marshal(*conn.LocalDescription())
@@ -422,11 +406,11 @@ func main() {
 				return
 			}
 			// TODO mux
-			chat, exist := chatsMap[selectedChatId]
+			chat, exist := getChat(selectedChatId)
 			if exist {
 				chat.Close()
 			}
-			delete(chatsMap, chat.id)
+			rmChat(chat.id)
 		}
 		dialog.NewConfirm("Confirm", "Remove chat?", rmChat, mainWindow).Show()
 	})
@@ -447,7 +431,7 @@ func main() {
 			NewModalPopup("Select chat first", mainWindow.Canvas()).Show()
 			return
 		}
-		chat, exist := chatsMap[selectedChatId]
+		chat, exist := getChat(selectedChatId)
 		if !exist {
 			log.Fatalf("selected chat %s not found in global chats map", selectedChatId)
 		}
@@ -461,8 +445,8 @@ func main() {
 		content.Add(container.NewBorder(nil, nil, nil, t))
 		content.Refresh()
 		chatUI.ScrollToBottom()
-
-		if err := chat.sendMessage(text); err != nil {
+		msg := &Message{PeerName: nickname, PeerId: ourPeerId, ChatId: chat.id, Text: text}
+		if err := chat.sendMessage(msg); err != nil {
 			slog.Error("send message", "error", err)
 		}
 		textEntry.SetText("")
@@ -590,13 +574,13 @@ func main() {
 	go func() {
 		for {
 			select {
-			case peer := <-peerConnected:
+			case peer := <-peerConnectedUI:
 				if _, exist := chatsMapUI[peer.chat.id]; !exist {
 					fyneChatList = append(fyneChatList, peer.chat.id)
 				}
 				fyne.Do(chatListWdg.Refresh)
 				getOrCreateChatWindow(peer.chat.id)
-			case peer := <-peerDisconnected:
+			case peer := <-peerDisconnectedUI:
 				// TODO review this case
 				rmChatFromList(peer.chat.id, &fyneChatList, chatListWdg)
 				lii := slices.Index(fyneChatList, peer.chat.id)
@@ -607,13 +591,13 @@ func main() {
 				}
 				fyne.Do(chatListWdg.Refresh)
 			case msg := <-messageReceived:
-				chat, exist := chatsMapUI[msg.Peer.chat.id]
+				chat, exist := chatsMapUI[msg.ChatId]
 				if !exist {
-					slog.Error("no chat window found", "chat", msg.Peer.chat.id)
+					slog.Error("no chat window found", "chat", msg.ChatId)
 					continue
 				}
 				chatContent := chat.Content.(*fyne.Container)
-				m := fmt.Sprintf("[%s]: %s", msg.Peer.Name, msg.string)
+				m := fmt.Sprintf("[%s]: %s", msg.PeerName, msg.Text)
 				t := canvas.NewText(m, color.White)
 				fyne.Do(func() {
 					chatContent.Add(container.NewBorder(nil, nil, t, nil))

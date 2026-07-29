@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -20,9 +21,9 @@ const (
 	hasNameFlag   PeerStateFlag = 32
 )
 const (
-	StatePending   PeerState = 1
-	StateConnected PeerState = 1 | connectedFlag
-	StateReady     PeerState = 1 | connectedFlag | hasCtrlFlag | hasMsgFlag | hasImgFlag | hasNameFlag
+	StatePending   PeerState = 0
+	StateConnected PeerState = connectedFlag
+	StateReady     PeerState = connectedFlag | hasCtrlFlag | hasMsgFlag | hasImgFlag | hasNameFlag
 )
 
 type Peer struct {
@@ -47,14 +48,28 @@ func NewPeer(c *webrtc.PeerConnection) *Peer {
 	}
 }
 
+func (p *Peer) addFlag(f PeerStateFlag) PeerState {
+	p.state |= f
+	switch p.state {
+	case StateReady:
+		//
+		for _, ch := range p.readyChans {
+			ch <- struct{}{}
+			close(ch)
+		}
+		p.readyChans = make([]chan<- struct{}, 0, 5)
+	case StateConnected:
+		//
+	}
+	return p.state
+}
+
 func SetupOfferor(
 	c *webrtc.PeerConnection,
 	name string,
 	chatName string,
-	r chan<- struct {
-		string
-		*Peer
-	}) (*Peer, error) {
+	onMsgRecv chan<- *Message,
+) (*Peer, error) {
 	p := NewPeer(c)
 	var err error
 	if p.CtrlChan, err = c.CreateDataChannel("ctrl", nil); err != nil {
@@ -69,7 +84,7 @@ func SetupOfferor(
 
 	p.CtrlChan.OnOpen(func() {
 		slog.Debug("channel opened", "name", p.CtrlChan.Label())
-		p.state |= hasCtrlFlag
+		p.addFlag(hasCtrlFlag)
 		if err := p.CtrlChan.SendText(fmt.Sprintf("0 %s", name)); err != nil {
 			slog.Error("error sending name")
 		}
@@ -78,48 +93,50 @@ func SetupOfferor(
 		}
 	})
 	p.CtrlChan.OnClose(func() {
-		p.state &= ^hasCtrlFlag
 		slog.Debug("channel closed", "name", p.CtrlChan.Label())
 	})
 	p.CtrlChan.OnMessage(func(m webrtc.DataChannelMessage) {
-		slog.Debug("channel msg recieved", "name", p.CtrlChan.Label(), "text", string(m.Data))
+		slog.Debug("channel msg recieved", "name", p.CtrlChan.Label(), "text", string(m.Data), "name", p.Name)
 		switch string(m.Data)[0] {
 		case '0':
 			slog.Debug("recv peer name", "name", string(m.Data))
 			p.Name = string(m.Data)[2:]
-			p.state |= hasNameFlag
+			p.addFlag(hasNameFlag)
 		default:
 			//
 		}
-		p.ifReady()
 	})
 
 	p.MsgChan.OnOpen(func() {
 		slog.Debug("channel opened", "name", p.MsgChan.Label())
-		p.state |= hasMsgFlag
+		p.addFlag(hasMsgFlag)
 	})
 	p.MsgChan.OnClose(func() {
 		slog.Debug("channel closed", "name", p.MsgChan.Label())
-		p.state &= ^hasMsgFlag
 	})
 	p.MsgChan.OnMessage(func(m webrtc.DataChannelMessage) {
-		slog.Debug("channel msg recieved", "name", p.MsgChan.Label(), "text", string(m.Data))
-		r <- struct {
-			string
-			*Peer
-		}{string(m.Data), p}
+		slog.Debug("channel msg recieved", "name", p.MsgChan.Label(), "text", string(m.Data), "peer", p.Name)
+		msg := &Message{}
+		if err := json.Unmarshal(m.Data, msg); err != nil {
+			slog.Error("message read", "error", err)
+			return
+		}
+		msg.ChatId = p.chat.id
+		onMsgRecv <- msg
+		if p.chat.isHosted {
+			p.chat.sendMessage(msg)
+		}
 	})
 
 	p.ImgChan.OnOpen(func() {
 		slog.Debug("channel opened", "name", p.ImgChan.Label())
-		p.state |= hasImgFlag
+		p.addFlag(hasImgFlag)
 	})
 	p.ImgChan.OnClose(func() {
 		slog.Debug("channel closed", "name", p.ImgChan.Label())
-		p.state &= ^hasImgFlag
 	})
 	p.ImgChan.OnMessage(func(msg webrtc.DataChannelMessage) {
-		slog.Debug("channel msg recieved", "name", p.ImgChan.Label(), "data", msg.Data)
+		slog.Debug("channel msg recieved", "name", p.ImgChan.Label(), "data", msg.Data, "peer", p.Name)
 	})
 
 	return p, nil
@@ -128,17 +145,15 @@ func SetupOfferor(
 func SetupOfferee(
 	c *webrtc.PeerConnection,
 	name string,
-	r chan<- struct {
-		string
-		*Peer
-	}) (*Peer, error) {
+	r chan<- *Message,
+) (*Peer, error) {
 	p := NewPeer(c)
 	c.OnDataChannel(func(dc *webrtc.DataChannel) {
 		slog.Debug("channel opened", "label", dc.Label())
 		switch dc.Label() {
 		case "ctrl":
 			p.CtrlChan = dc
-			p.state |= hasCtrlFlag
+			p.addFlag(hasCtrlFlag)
 			p.CtrlChan.OnOpen(func() {
 				if err := p.CtrlChan.SendText(fmt.Sprintf("0 %s", name)); err != nil {
 					slog.Error("error sending name")
@@ -150,30 +165,32 @@ func SetupOfferee(
 				case '0':
 					slog.Debug("recv peer name", "name", string(m.Data))
 					p.Name = string(m.Data)[2:]
-					p.state |= hasNameFlag
+					p.addFlag(hasNameFlag)
 				case '1':
 					slog.Debug("recv chat name", "name", string(m.Data))
 					p.chat.name = string(m.Data)[2:]
 				}
-				p.ifReady()
 			})
 		case "msg":
 			p.MsgChan = dc
-			p.state |= hasMsgFlag
+			p.addFlag(hasMsgFlag)
 			p.MsgChan.OnMessage(func(m webrtc.DataChannelMessage) {
 				slog.Debug("channel msg received", "name", p.MsgChan.Label(), "data", m.Data)
-				r <- struct {
-					string
-					*Peer
-				}{string(m.Data), p}
+				msg := &Message{}
+				if err := json.Unmarshal(m.Data, msg); err != nil {
+					slog.Error("message read", "error", err)
+					return
+				}
+				// TODO chat id should be separate from message
+				msg.ChatId = p.chat.id
+				r <- msg
 			})
 		case "img":
 			p.ImgChan = dc
-			p.state |= hasImgFlag
+			p.addFlag(hasImgFlag)
 		default:
 			log.Fatalln("unknown channel label")
 		}
-		p.ifReady()
 	})
 	return p, nil
 }
@@ -190,16 +207,6 @@ func (p *Peer) Disconnect() {
 	}
 	if p.conn != nil {
 		p.conn.Close()
-	}
-}
-
-func (p *Peer) ifReady() {
-	if p.state == StateReady {
-		for _, ch := range p.readyChans {
-			ch <- struct{}{}
-			close(ch)
-		}
-		p.readyChans = make([]chan<- struct{}, 0, 5)
 	}
 }
 

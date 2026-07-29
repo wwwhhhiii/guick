@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"sync"
 
 	"github.com/google/uuid"
@@ -14,11 +15,45 @@ type Chat struct {
 	isHosted bool
 }
 
-func (c *Chat) sendMessage(m string) error {
-	// TODO make parallel
+var chatsMap = make(map[uuid.UUID]*Chat)
+var mu sync.Mutex
+
+type Message struct {
+	PeerName string    `json:"peerName"`
+	PeerId   uuid.UUID `json:"peerId"`
+	ChatId   uuid.UUID `json:"chatId"`
+	Text     string    `json:"text"`
+}
+
+func getChat(id uuid.UUID) (*Chat, bool) {
+	mu.Lock()
+	c, ok := chatsMap[id]
+	mu.Unlock()
+	return c, ok
+}
+
+func addChat(c *Chat) {
+	mu.Lock()
+	chatsMap[c.id] = c
+	mu.Unlock()
+}
+
+func rmChat(id uuid.UUID) {
+	mu.Lock()
+	delete(chatsMap, id)
+	mu.Unlock()
+}
+
+// TODO make trySendMessage and do not return errors
+func (c *Chat) sendMessage(m *Message) error {
+	// TODO impl message write pump
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
 	for _, p := range c.peers {
-		if p.MsgChan != nil {
-			if err := p.MsgChan.SendText(m); err != nil {
+		if p.MsgChan != nil && p.Name != m.PeerName {
+			if err := p.MsgChan.Send(data); err != nil {
 				return err
 			}
 		}
