@@ -70,3 +70,18 @@ func CpyPopup(message string, cpy string, canvas fyne.Canvas) *widget.PopUp {
 	)
 	return modal
 }
+
+func TextPrompt(canvas fyne.Canvas, placeholder string) (*widget.Entry, <-chan string) {
+	out := make(chan string)
+	entry := widget.NewEntry()
+	entry.SetPlaceHolder(placeholder)
+	var p *widget.PopUp
+	entry.OnSubmitted = func(s string) {
+		out <- s
+		p.Hide()
+	}
+	p = widget.NewModalPopUp(entry, canvas)
+	p.Resize(fyne.NewSize(100, 20))
+	p.Show()
+	return entry, out
+}

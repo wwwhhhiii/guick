@@ -343,7 +343,7 @@ func RandSecret(n uint64) []byte {
 	return b
 }
 
-func decodeSdp(b64s string) (*webrtc.SessionDescription, error) {
+func decodeSDP(b64s string) (*webrtc.SessionDescription, error) {
 	sdpData, err := base64.StdEncoding.DecodeString(b64s)
 	if err != nil {
 		return nil, err
@@ -353,4 +353,12 @@ func decodeSdp(b64s string) (*webrtc.SessionDescription, error) {
 		return nil, err
 	}
 	return sdp, nil
+}
+
+func encodeSDP(sdp *webrtc.SessionDescription) (string, error) {
+	sdpdata, err := json.Marshal(sdp)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(sdpdata), nil
 }
